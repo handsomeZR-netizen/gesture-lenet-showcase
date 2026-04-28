@@ -27,6 +27,9 @@
             <select id="modelSelect" class="model-select"></select>
           </label>
           <button id="startButton" class="primary-button" type="button">启动摄像头</button>
+          <a class="train-link" href="./record.html" title="录制自己的手势数据集，约 5 分钟训出专属模型">
+            <span class="train-link-icon">🎬</span>训练我的模型
+          </a>
           <button id="unlockButton" class="ghost-button" type="button">解锁</button>
           <button id="pauseButton" class="ghost-button" type="button">暂停</button>
           <label class="test-toggle">
@@ -40,9 +43,17 @@
 
       <main class="app-main">
         <section class="live-panel">
-          <div class="camera-stage">
+          <div class="camera-stage" id="cameraStage" data-view="color">
             <video id="cameraFeed" playsinline muted></video>
+            <canvas id="processedCanvas" hidden></canvas>
             <canvas id="overlayCanvas"></canvas>
+            <div class="view-switcher" role="group" aria-label="视角切换">
+              <button class="view-btn is-active" data-view="color" type="button" title="原始彩色 RGB">彩色</button>
+              <button class="view-btn" data-view="gray" type="button" title="单通道灰度">灰度</button>
+              <button class="view-btn" data-view="binary" type="button" title="Otsu 自适应二值化">二值化</button>
+              <button class="view-btn" data-view="edges" type="button" title="Sobel 一阶梯度边缘">边缘</button>
+              <button class="view-btn" data-view="skeleton" type="button" title="只显示 21 关键点骨架">纯骨架</button>
+            </div>
             <div id="cameraOverlay" class="camera-overlay">
               <p class="overlay-title">摄像头未启动</p>
               <p class="overlay-body">点上方「启动摄像头」并允许浏览器访问。</p>

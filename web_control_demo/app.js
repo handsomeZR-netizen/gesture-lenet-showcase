@@ -112,6 +112,19 @@ const ui = {
 const video = document.getElementById("cameraFeed");
 const overlayCanvas = document.getElementById("overlayCanvas");
 const overlayContext = overlayCanvas.getContext("2d");
+const processedCanvas = document.getElementById("processedCanvas");
+const processedCtx = processedCanvas ? processedCanvas.getContext("2d") : null;
+const cameraStage = document.getElementById("cameraStage");
+// 离屏缓冲：把 video 帧降采样到这里再做像素处理，保证 30 FPS
+const _proc = {
+  scratch: document.createElement("canvas"),
+  scratchCtx: null,
+  width: 320,
+  height: 180,
+};
+_proc.scratch.width = _proc.width;
+_proc.scratch.height = _proc.height;
+_proc.scratchCtx = _proc.scratch.getContext("2d", { willReadFrequently: true });
 
 const state = {
   handLandmarker: null,
@@ -133,6 +146,7 @@ const state = {
   activeModelName: null,
   demoMode: false,
   wsAttempts: 0,
+  viewMode: localStorage.getItem("gesture_view_mode") || "color",
 };
 
 const smoother = new LabelSmoother();
@@ -354,6 +368,119 @@ function syncOverlaySize() {
   overlayCanvas.style.width = `${rect.width}px`;
   overlayCanvas.style.height = `${rect.height}px`;
   overlayContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (processedCanvas) {
+    processedCanvas.width = _proc.width;
+    processedCanvas.height = _proc.height;
+    processedCanvas.style.width = `${rect.width}px`;
+    processedCanvas.style.height = `${rect.height}px`;
+  }
+}
+
+// =================== 视角切换：实时图像处理 =====================
+
+function applyViewMode(mode) {
+  state.viewMode = mode;
+  localStorage.setItem("gesture_view_mode", mode);
+  if (cameraStage) cameraStage.dataset.view = mode;
+  if (processedCanvas) {
+    const showProcessed = mode === "binary" || mode === "edges";
+    processedCanvas.hidden = !showProcessed;
+  }
+  document.querySelectorAll(".view-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.view === mode);
+  });
+}
+
+function paintProcessedFrame(mode) {
+  if (!processedCtx || !_proc.scratchCtx) return;
+  if (mode !== "binary" && mode !== "edges") return;
+  if (video.readyState < 2) return;
+  const w = _proc.width;
+  const h = _proc.height;
+  _proc.scratchCtx.drawImage(video, 0, 0, w, h);
+  const img = _proc.scratchCtx.getImageData(0, 0, w, h);
+  if (mode === "binary") otsuBinary(img);
+  else if (mode === "edges") sobelEdges(img);
+  processedCtx.putImageData(img, 0, 0);
+}
+
+// ITU-R BT.601 luma 公式：Y = 0.299R + 0.587G + 0.114B
+function _grayLuma(data, i) {
+  return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+}
+
+// Otsu 自适应二值化：扫一遍直方图找类间方差最大的阈值
+function otsuBinary(img) {
+  const data = img.data;
+  const n = data.length / 4;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < data.length; i += 4) {
+    hist[Math.round(_grayLuma(data, i))] += 1;
+  }
+  let sum = 0;
+  for (let t = 0; t < 256; t += 1) sum += t * hist[t];
+  let sumB = 0;
+  let wB = 0;
+  let varMax = -1;
+  let thresh = 127;
+  for (let t = 0; t < 256; t += 1) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = n - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > varMax) {
+      varMax = v;
+      thresh = t;
+    }
+  }
+  for (let i = 0; i < data.length; i += 4) {
+    const v = _grayLuma(data, i) > thresh ? 255 : 0;
+    data[i] = data[i + 1] = data[i + 2] = v;
+    data[i + 3] = 255;
+  }
+}
+
+// Sobel 一阶梯度边缘：3x3 Gx/Gy 卷积，magnitude → 灰度输出
+function sobelEdges(img) {
+  const w = img.width;
+  const h = img.height;
+  const data = img.data;
+  // 先把灰度算到一个 typed array，避免反复读 RGBA
+  const gray = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+    gray[p] = _grayLuma(data, i);
+  }
+  const out = new Float32Array(w * h);
+  let maxMag = 0;
+  for (let y = 1; y < h - 1; y += 1) {
+    for (let x = 1; x < w - 1; x += 1) {
+      const i = y * w + x;
+      const tl = gray[i - w - 1];
+      const tc = gray[i - w];
+      const tr = gray[i - w + 1];
+      const ml = gray[i - 1];
+      const mr = gray[i + 1];
+      const bl = gray[i + w - 1];
+      const bc = gray[i + w];
+      const br = gray[i + w + 1];
+      const gx = -tl - 2 * ml - bl + tr + 2 * mr + br;
+      const gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+      const m = Math.hypot(gx, gy);
+      out[i] = m;
+      if (m > maxMag) maxMag = m;
+    }
+  }
+  const norm = maxMag > 1 ? 255 / maxMag : 1;
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+    const v = Math.min(255, out[p] * norm);
+    // 反相：边缘亮、背景黑（更像教材里的 Canny 输出）
+    data[i] = data[i + 1] = data[i + 2] = v;
+    data[i + 3] = 255;
+  }
 }
 
 function drawSkeleton(landmarks) {
@@ -605,6 +732,8 @@ async function loop() {
 
   if (video.readyState >= 2 && video.currentTime !== state.lastVideoTime) {
     state.lastVideoTime = video.currentTime;
+    // 视角处理（binary / edges 时把帧画到 processedCanvas）
+    paintProcessedFrame(state.viewMode);
     lastInferenceStart = performance.now();
     let result;
     try {
@@ -1208,6 +1337,13 @@ function bindUi() {
       setActiveModel(event.target.value);
     });
   }
+  document.querySelectorAll(".view-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyViewMode(btn.dataset.view);
+      showBubble(`视角：${btn.textContent}`, "info");
+    });
+  });
+  applyViewMode(state.viewMode);
 }
 
 (async function main() {
