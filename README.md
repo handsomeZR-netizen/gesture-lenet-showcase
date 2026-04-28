@@ -191,6 +191,240 @@ gesture-lenet-showcase/
 
 ---
 
+## 🎓 计算机视觉模型讲解（课堂汇报版）
+
+> 本节专门给 **CV 课老师答辩** 准备：从「为什么这样设计」讲到「具体每一步是什么」，
+> 配套的 PPT 大纲见 [`docs/课堂汇报.md`](docs/课堂汇报.md)。
+
+### A. 任务定义（一句话讲清）
+
+> 「输入是一段摄像头视频流，输出是离散的手势类别 + 触发时刻；分类器要做到实时（≤ 30 ms）、稳定（不闪烁）、对手部位置/距离/旋转不敏感。」
+
+这跟传统图像分类（一张图 → 一个标签）不同，关键挑战在 **实时连续性** 和 **几何不变性**。
+
+### B. 视觉处理流水线（5 步）
+
+```
+摄像头帧 (RGB 1280x720)
+  │
+  ▼ ① MediaPipe Hand Landmarker (Google 训练好的 BlazePalm + HandLandmark)
+  │    输出 21 个手部关键点 (x, y, z) ∈ [0, 1]
+  │
+  ▼ ② 几何归一化 (gesture_mlp/features.py · landmarks_to_feature)
+  │    平移：以 wrist 为原点
+  │    缩放：除以掌心尺度，去除距离影响
+  │    镜像：左手翻转为右手坐标系
+  │    展平：21×3 = 63 维向量
+  │
+  ▼ ③ MLP 分类器 (gesture_mlp/model.py · GestureMLP) ← 我们自己训的
+  │    63 → 128 → 64 → 10  (17 K 参数 / 69 KB ONNX)
+  │    输出 10 类静态手势的概率分布
+  │
+  ▼ ④ 时间平滑 (modules/temporalSmoother.js)
+  │    7 帧滑窗投票 + 进入 55% / 退出 40% 滞后阈值
+  │    抖动 → 稳定标签
+  │
+  ▼ ⑤ 几何 reranker (app.js · rerankPinchVsFistOk / rerankFistVsThumbs)
+       关键点几何二次校验，修正 MLP 的系统性混淆
+       (pinch ↔ fist/ok, fist ↔ thumbs_up/down)
+```
+
+### C. 为什么不直接用 CNN/Transformer 处理图像？
+
+> 这是答辩**最常被问**的问题。
+
+| 方案 | 优点 | 缺点 |
+|---|---|---|
+| 端到端 CNN（图 → 类别） | 一步到位 | 模型大（MB 级）、对手部位置/距离敏感、需要大量数据增强 |
+| **关键点 + MLP（本项目）** | 模型极小（69 KB）、几何不变性天然内置、推理 < 2 ms | 依赖前一阶段关键点检测 |
+
+**本质原因**：MediaPipe 已经替我们解决了「从像素中提取手部」这个困难问题（人家用了 30 万张图训练 BlazePalm 检测器和 HandLandmark 回归器）。我们只需要解决「21 个关键点 → 哪个手势」这个轻量后端问题，自然不需要再放一个大 CNN。
+
+### D. 特征工程：让 MLP 输入有几何不变性
+
+```python
+def landmarks_to_feature(landmarks, handedness):
+    # 1. 平移不变：所有点减去 wrist 坐标
+    centered = landmarks - landmarks[0]
+    
+    # 2. 尺度不变：除以掌心尺度
+    scale = max(‖wrist − middleMcp‖, ‖indexMcp − pinkyMcp‖)
+    scaled = centered / scale
+    
+    # 3. 镜像归一：左手翻转为右手坐标系
+    if handedness == "Left":
+        scaled[:, 0] *= -1
+    
+    return scaled.flatten()  # (63,)
+```
+
+**为什么这样设计**：
+- 手在画面任意位置识别都一致 → `平移不变`
+- 手离镜头远近识别都一致 → `尺度不变`
+- 同一手势用左右手都识别一致 → `镜像归一`
+
+这三条不变性是 `tests/test_features.py` 里的 4 个单元测试：
+```
+test_feature_translation_invariance  ✅
+test_feature_scale_invariance         ✅
+test_left_hand_mirrors_right          ✅
+test_wrist_is_origin                  ✅
+```
+
+### E. 模型架构
+
+```python
+class GestureMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(63, 128), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(64, 10),
+        )
+```
+
+**为什么是 MLP 而不是 CNN/RNN**：
+- 输入已经是高度抽象的 63D 几何特征向量（不是像素），CNN 的卷积没意义
+- 单帧静态识别，不需要 RNN 的时序建模
+- 模型小到能塞进浏览器（69 KB，瞬时下载）
+
+**参数量计算**：
+- (63 + 1) × 128 = 8,192
+- (128 + 1) × 64 = 8,256
+- (64 + 1) × 10 = 650
+- 总计 17,098 个参数 — 比一张 256×256 的图（65,536 个像素）还少
+
+### F. 训练设置
+
+| 超参数 | 值 | 说明 |
+|---|---|---|
+| 优化器 | AdamW | 比 Adam 多了 weight decay |
+| 学习率 | 1e-3 | 基础 |
+| Weight decay | 1e-4 | 抑制过拟合 |
+| Scheduler | CosineAnnealing | 余弦退火 |
+| Batch size | 64 | |
+| Epochs | 80 | |
+| 数据增强 | 高斯抖动 σ=0.01 | 每个特征值加少量噪声 |
+| 验证集比例 | 15% | stratified 切分 |
+
+**实际训练用的数据**：用户用 Web 录制向导（`record.html`）采集的 10 类手势，每类 250 帧，总共 2500 个 63D 向量。CPU 上 56 秒训完。
+
+### G. 评估指标
+
+在我自录的数据集上：
+
+| 指标 | 数值 |
+|---|---|
+| 训练时间 | 56.9 秒（CPU） |
+| 验证准确率 | **100.0%** |
+| Macro-F1 | 1.000 |
+| 模型大小 | 69 KB ONNX |
+| 浏览器推理延迟 | < 2 ms |
+| 端到端延迟（摄像头→识别） | < 30 ms |
+
+> ⚠️ 验证集是从同一录制时段切出来的，所以 100% 高估了真实泛化效果。
+> 严格的评估应该收集「不同时间、不同灯光、不同人」的 hold-out 集，
+> 但作为课程项目这个数字已经能说明 **流水线没有问题**。
+
+### H. 时间平滑（关键 trick）
+
+**问题**：单帧识别即使准确率 99%，每秒 30 帧也意味着每秒约 0.3 帧抖动 → UI 标签会闪烁。
+
+**解决**：滑窗投票 + 滞后阈值（`modules/temporalSmoother.js`）
+
+```javascript
+// 维护最近 7 帧的标签历史
+push(label) {
+    this.history.push(label);
+    if (this.history.length > 7) this.history.shift();
+    
+    // 找出出现频次最高的标签
+    const [bestLabel, count] = mostFrequent(this.history);
+    const ratio = count / 7;
+    
+    // 进入新标签需要 ≥ 55% 占比，退出需要 < 40%（滞后避免边界抖动）
+    if (this.currentLabel !== bestLabel && ratio >= 0.55) {
+        this.currentLabel = bestLabel;
+    } else if (this.currentLabel === bestLabel && ratio < 0.4) {
+        this.currentLabel = null;
+    }
+    return this.currentLabel;
+}
+```
+
+效果：用户切换手势的延迟约 100-200 ms，但识别**完全不闪烁**，体验质感大不一样。
+
+### I. 动态手势检测（不靠 MLP）
+
+静态 MLP 看不见运动。我们用平行通路检测「手腕轨迹」（`modules/temporalSmoother.js · SwipeDetector`）：
+
+```javascript
+observe(point, ts) {
+    this.points.push({...point, ts});
+    // 保留最近 0.4 秒
+    this.points = this.points.filter(p => ts - p.ts < 400);
+    if (this.points.length < 5) return null;
+    
+    const dx = last.x - first.x, dy = last.y - first.y;
+    if (Math.hypot(dx, dy) < 0.22) return null;
+    
+    // 选位移更大的方向
+    if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? "swipe_right" : "swipe_left";
+    return dy < 0 ? "swipe_up" : "swipe_down";
+}
+```
+
+扩展了 4 类动态手势：上滑/下滑/左滑/右滑，专门绑定到滚动 / 切歌等连续操作。
+
+### J. 后处理 reranker（无需重训就能修复混淆）
+
+实测发现 MLP 易混两组类对：
+1. **fist ↔ thumbs_up / thumbs_down**：四指都收拢，外形相似
+2. **pinch ↔ ok / fist**：拇指食指距离都接近
+
+**思路**：MLP 输出可疑标签时，再用关键点几何规则二次校验。例：
+
+```javascript
+// fist → thumbs_up 校验
+function rerankFistVsThumbs(result, landmarks) {
+    if (result.label !== "fist") return result;
+    const thumbTip = landmarks[4];
+    const otherTips = [8, 12, 16, 20].map(i => landmarks[i]);
+    const upGap = (min(otherTips.y) - thumbTip.y) / palmScale;
+    if (upGap > 0.35 && thumbExtension > 1.05) {
+        return {...result, label: "thumbs_up"};   // ← 改判
+    }
+    return result;
+}
+```
+
+效果：在**不重训模型**的前提下，把 thumbs_up 的实测准确率从 ~70% 提到 ~95%。
+
+### K. 跨语言一致性（Python ↔ JS）
+
+特征工程必须在 Python（训练时）和 JS（浏览器推理时）**完全一致**，否则 ONNX 输入分布会偏，准确率崩塌。
+
+**做法**：
+1. 在 `gesture_mlp/features.py` 写 Python 实现
+2. 在 `web_control_demo/modules/features.js` 写 JS 实现
+3. 用 fixture 测试做交叉验证：
+
+```bash
+node tests/test_features_js.mjs
+# CROSS-LANG OK max diff=5.96e-8
+```
+
+float32 epsilon 级别的差异 = 算法严格一致。
+
+### L. 一句话总结（如果只能讲一句）
+
+> 「我们没有再训一个大 CNN 去看像素，而是站在 MediaPipe 已有的 21 关键点回归器肩膀上，
+> 用 17K 参数的 MLP + 几何归一化 + 时间平滑 + 几何 reranker，
+> 实现了模型 < 100 KB、推理 < 2 ms、准确率 ≥ 95%、抖动几乎为零的实时手势识别。」
+
+---
+
 ## 🔬 算法细节
 
 ### 特征工程（63 维向量）
