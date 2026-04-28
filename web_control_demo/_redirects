@@ -1,0 +1,2 @@
+# Cloudflare Pages: 让 / 直接 serve index.html，相对路径都正常解析。
+/   /index.html   200

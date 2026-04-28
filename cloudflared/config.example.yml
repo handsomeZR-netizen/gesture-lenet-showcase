@@ -1,0 +1,45 @@
+# cloudflared tunnel 配置示例
+#
+# 使用方法（一次性）：
+#   1. 安装 cloudflared：
+#        wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+#        sudo dpkg -i cloudflared-linux-amd64.deb
+#
+#   2. 登录 Cloudflare 账号（会打开浏览器）：
+#        cloudflared tunnel login
+#
+#   3. 创建一个 tunnel：
+#        cloudflared tunnel create gesture-control
+#      会输出形如 "Created tunnel gesture-control with id <UUID>"，记下 UUID。
+#
+#   4. 在 Cloudflare Dashboard → 你的域名 → DNS 加一条 CNAME：
+#        gesture-api.你的域名.com  →  <UUID>.cfargotunnel.com
+#      或者直接命令行加：
+#        cloudflared tunnel route dns gesture-control gesture-api.example.com
+#
+#   5. 复制本文件到 ~/.cloudflared/config.yml，把 <UUID> 和域名替换成你的：
+#        cp cloudflared/config.example.yml ~/.cloudflared/config.yml
+#
+#   6. 启动后端（带 token，强制要求认证）+ tunnel：
+#        export GESTURE_AUTH_TOKEN=$(openssl rand -hex 24)
+#        export GESTURE_CORS_ORIGINS="https://gesture.pages.dev"
+#        ./run_gesture_control.sh &
+#        cloudflared tunnel run gesture-control
+#
+#   7. 在 Cloudflare Pages 部署的前端用：
+#        https://gesture.pages.dev/?api=https://gesture-api.example.com&token=<你刚生成的 token>
+#      第一次访问后 token 会保存在 localStorage，后续直接打开根 URL 即可。
+
+tunnel: <你的-tunnel-uuid>
+credentials-file: /home/xzr/.cloudflared/<你的-tunnel-uuid>.json
+
+ingress:
+  # 把公网 https://gesture-api.example.com 全部转发到本机 8765
+  - hostname: gesture-api.example.com
+    service: http://localhost:8765
+    originRequest:
+      noTLSVerify: true
+      # WebSocket 长连接默认就支持，不需要额外开关
+
+  # 兜底
+  - service: http_status:404

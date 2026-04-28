@@ -134,12 +134,51 @@ const state = {
 
 const smoother = new LabelSmoother();
 const swipe = new SwipeDetector();
-const controlClient = new ControlClient({ url: deriveWsUrl() });
+
+// 从 URL 读取自定义后端地址 + token，方便云端前端连本地 Tunnel。
+//   ?api=https://gesture-api.example.com         覆盖后端 URL
+//   ?token=xxxx                                  附加 auth token
+//   也支持 localStorage 持久化（输入一次后存住）
+const params = new URLSearchParams(window.location.search);
+const apiOverride =
+  params.get("api") || localStorage.getItem("gesture_api_base") || "";
+const authToken =
+  params.get("token") || localStorage.getItem("gesture_auth_token") || "";
+if (params.get("api")) localStorage.setItem("gesture_api_base", apiOverride);
+if (params.get("token")) localStorage.setItem("gesture_auth_token", authToken);
+
+function apiBase() {
+  if (apiOverride) return apiOverride.replace(/\/$/, "");
+  return ""; // same-origin
+}
+
+function buildApiUrl(path) {
+  const base = apiBase();
+  const sep = path.includes("?") ? "&" : "?";
+  const tokenPart = authToken ? `${sep}token=${encodeURIComponent(authToken)}` : "";
+  return `${base}${path}${tokenPart}`;
+}
+
+function fetchApi(path, init = {}) {
+  const headers = { ...(init.headers || {}) };
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+  return fetch(buildApiUrl(path), { ...init, headers });
+}
 
 function deriveWsUrl() {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws/control`;
+  const base = apiBase();
+  let wsBase;
+  if (base) {
+    wsBase = base.replace(/^http/, "ws");
+  } else {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    wsBase = `${protocol}//${window.location.host}`;
+  }
+  const tokenPart = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+  return `${wsBase}/ws/control${tokenPart}`;
 }
+
+const controlClient = new ControlClient({ url: deriveWsUrl() });
 
 function setStatusPill(el, text, kind) {
   el.textContent = text;
@@ -662,7 +701,7 @@ async function pushBindings() {
     for (const [label, spec] of Object.entries(state.bindings)) {
       payload[label] = { action: spec.action, enabled: !!spec.enabled };
     }
-    await fetch("/api/bindings", {
+    await fetchApi("/api/bindings", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ bindings: payload }),
@@ -674,7 +713,7 @@ async function pushBindings() {
 
 async function loadAvailableModels() {
   try {
-    const data = await fetch("/api/models").then((r) => r.json());
+    const data = await fetchApi("/api/models").then((r) => r.json());
     state.models = data.models || [];
     state.activeModelName = data.active || (state.models[0]?.name ?? null);
     renderModelSelect();
@@ -753,7 +792,7 @@ async function loadActiveGestureModel({ initial = false } = {}) {
 async function setActiveModel(name) {
   if (!name || name === state.activeModelName) return;
   try {
-    const res = await fetch("/api/models/active", {
+    const res = await fetchApi("/api/models/active", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name }),
@@ -845,8 +884,8 @@ function buildDemoBindings() {
 async function loadInitialState() {
   try {
     const [statusResp, actionsResp] = await Promise.all([
-      fetch("/api/status").then((r) => r.json()),
-      fetch("/api/actions").then((r) => r.json()),
+      fetchApi("/api/status").then((r) => r.json()),
+      fetchApi("/api/actions").then((r) => r.json()),
     ]);
     state.bindings = statusResp.bindings || {};
     state.actions = actionsResp.actions || [];
@@ -922,7 +961,7 @@ function bindUi() {
     });
   }
   ui.unlockButton.addEventListener("click", () => {
-    fetch("/api/control/unlock", { method: "POST" })
+    fetchApi("/api/control/unlock", { method: "POST" })
       .then((r) => r.json())
       .then((data) => {
         applyControlSnapshot({
@@ -935,7 +974,7 @@ function bindUi() {
       .catch(() => showBubble("解锁请求失败", "warn"));
   });
   ui.pauseButton.addEventListener("click", () => {
-    fetch("/api/control/toggle_pause", { method: "POST" })
+    fetchApi("/api/control/toggle_pause", { method: "POST" })
       .then((r) => r.json())
       .then((data) => {
         applyControlSnapshot({

@@ -12,7 +12,82 @@
 
 ---
 
-## 方案 A · Vercel（推荐用于演示 / 课堂展示）
+## 方案 ★ · Cloudflare Pages + Tunnel = 真正的「完整云端版」（推荐）
+
+> 为什么这是唯一可行的「完整云部署」：Cloudflare Tunnel 把你**本地的后端**用一个公网 HTTPS / WSS 地址挂出去，
+> 让 Cloudflare Pages 的前端能跨网络访问到你的真实控制后端，**而后端依然在你电脑上 evdev 注入键鼠**。
+> 既保留了真实控制能力，又拿到了公网 URL。
+
+### 架构
+
+```
+[ 任意浏览器 ]──HTTPS──▶[ Cloudflare Pages ]            前端，免费
+       │
+       └──WSS───▶[ Cloudflare Tunnel ]──▶[ 你电脑本地 :8765 ] 后端 + evdev
+                  公网 HTTPS                你的鼠标键盘
+```
+
+### 一次性配置（约 10 分钟）
+
+#### 步骤 1：装 cloudflared
+```bash
+wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared-linux-amd64.deb
+
+cloudflared tunnel login                  # 浏览器登录 Cloudflare 账号
+cloudflared tunnel create gesture-control # 记下输出的 UUID
+```
+
+#### 步骤 2：配 DNS
+在 Cloudflare Dashboard 给你的某个域名加 CNAME 子域，或一行命令：
+```bash
+cloudflared tunnel route dns gesture-control gesture-api.你的域名.com
+```
+
+#### 步骤 3：本地放 tunnel 配置
+```bash
+mkdir -p ~/.cloudflared
+cp cloudflared/config.example.yml ~/.cloudflared/config.yml
+# 编辑 ~/.cloudflared/config.yml 把 <UUID> 和域名替换成你的
+```
+
+#### 步骤 4：把前端部署到 Cloudflare Pages
+- Dashboard → Workers & Pages → Create → Pages → Connect to Git → 选 `gesture-lenet-showcase`
+- Build command 留空
+- Build output directory: `web_control_demo`
+- Deploy → 拿到 URL，例如 `https://gesture-control.pages.dev`
+
+#### 步骤 5：启动公网模式后端 + Tunnel
+```bash
+# 终端 A — 启动后端（自动生成 token，开 CORS 给 Pages）
+FRONTEND_ORIGIN=https://gesture-control.pages.dev ./run_gesture_control_public.sh
+# 输出会显示完整的访问 URL，复制下来
+
+# 终端 B — 起 tunnel
+cloudflared tunnel run gesture-control
+```
+
+#### 步骤 6：打开
+浏览器访问：
+```
+https://gesture-control.pages.dev/?api=https://gesture-api.你的域名.com&token=<刚才生成的 token>
+```
+首次访问后 `api`/`token` 会存进 `localStorage`，之后直接打开根 URL 即可。
+
+把这个完整带 token 的 URL **保留给自己**，别人没 token 不能控制你电脑。
+
+### 安全要点
+- **Token 是免登录的全部凭据** — 别截图带 token 的地址栏分享出去
+- 想给同学玩：分享**不带 `?api=&token=`** 的 URL，他们会自动进入「演示模式」
+- 任何时候后端日志看到陌生 IP 的 401 就关掉 token 重新生成：删除 `~/.config/gesture_control/auth_token` 后重启即可
+
+### 关于 Cloudflare 免费额度
+- Pages：500 次构建/月、无限带宽，个人项目用不完
+- Tunnel：免费、无需信用卡、不会过期（与 Railway 试用期完全不同）
+
+---
+
+## 方案 A · Vercel（演示 / 课堂展示）
 
 把 `web_control_demo/` 部署成 Vercel 静态站。任何人打开 URL 都能看到识别 + UI；没运行本地后端时**自动进入「演示模式」**：手势照常识别、绑定面板照常操作，只是不真发动作。
 

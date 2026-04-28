@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -140,7 +141,13 @@ class DatasetPayload(BaseModel):
     samples: list[DatasetSample]
 
 
-def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
+def create_app(
+    *,
+    sensitivity: float = 1.2,
+    safe_start: bool = True,
+    auth_token: str | None = None,
+    cors_origins: list[str] | None = None,
+) -> FastAPI:
     bindings_state = load_bindings()
     controller = GestureController(
         sensitivity=sensitivity,
@@ -148,7 +155,35 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
         bindings=bindings_state,
     )
 
-    app = FastAPI(title="手势控制后端", version="0.1.0")
+    app = FastAPI(title="手势控制后端", version="0.2.0")
+
+    # 跨域：让 Cloudflare Pages / Vercel 等公网前端能调本地后端
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    def require_token(
+        authorization: str | None = Header(default=None),
+        token_query: str | None = Query(default=None, alias="token"),
+    ) -> None:
+        """统一的 HTTP token 校验。auth_token 为 None 时所有请求放行（本地直连）。"""
+        if auth_token is None:
+            return
+        provided = None
+        if authorization and authorization.lower().startswith("bearer "):
+            provided = authorization[7:].strip()
+        elif token_query:
+            provided = token_query
+        if provided != auth_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid auth token",
+            )
 
     @app.get("/")
     def index() -> RedirectResponse:
@@ -156,7 +191,7 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
         # ./styles.css / ./app.js / ./modules/... 解析正确
         return RedirectResponse(url="/web_control_demo/", status_code=307)
 
-    @app.get("/api/status")
+    @app.get("/api/status", dependencies=[Depends(require_token)])
     def api_status() -> JSONResponse:
         snap = controller.snapshot()
         return JSONResponse(
@@ -173,7 +208,7 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
             }
         )
 
-    @app.get("/api/actions")
+    @app.get("/api/actions", dependencies=[Depends(require_token)])
     def api_actions() -> JSONResponse:
         return JSONResponse(
             {
@@ -184,11 +219,11 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
             }
         )
 
-    @app.get("/api/bindings")
+    @app.get("/api/bindings", dependencies=[Depends(require_token)])
     def api_bindings_get() -> JSONResponse:
         return JSONResponse({"bindings": controller.bindings})
 
-    @app.put("/api/bindings")
+    @app.put("/api/bindings", dependencies=[Depends(require_token)])
     def api_bindings_put(payload: BindingsPayload) -> JSONResponse:
         new_bindings = {
             label: spec.model_dump() for label, spec in payload.bindings.items()
@@ -197,22 +232,22 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
         save_bindings(merged)
         return JSONResponse({"bindings": merged})
 
-    @app.post("/api/control/unlock")
+    @app.post("/api/control/unlock", dependencies=[Depends(require_token)])
     def api_control_unlock() -> JSONResponse:
         snap = controller.enable()
         return JSONResponse({"state": snap.state, "last_action": snap.last_action})
 
-    @app.post("/api/control/lock")
+    @app.post("/api/control/lock", dependencies=[Depends(require_token)])
     def api_control_lock() -> JSONResponse:
         snap = controller.lock()
         return JSONResponse({"state": snap.state, "last_action": snap.last_action})
 
-    @app.post("/api/control/toggle_pause")
+    @app.post("/api/control/toggle_pause", dependencies=[Depends(require_token)])
     def api_control_toggle() -> JSONResponse:
         snap = controller.toggle_pause()
         return JSONResponse({"state": snap.state, "last_action": snap.last_action})
 
-    @app.get("/api/models")
+    @app.get("/api/models", dependencies=[Depends(require_token)])
     def api_models() -> JSONResponse:
         return JSONResponse(
             {
@@ -224,7 +259,7 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
     class ActiveModelPayload(BaseModel):
         name: str
 
-    @app.put("/api/models/active")
+    @app.put("/api/models/active", dependencies=[Depends(require_token)])
     def api_models_set_active(payload: ActiveModelPayload) -> JSONResponse:
         names = {m["name"] for m in list_available_models()}
         if payload.name not in names:
@@ -232,7 +267,7 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
         save_active_model_name(payload.name)
         return JSONResponse({"active": payload.name})
 
-    @app.post("/api/dataset/{label}")
+    @app.post("/api/dataset/{label}", dependencies=[Depends(require_token)])
     def api_dataset_post(label: str, payload: DatasetPayload) -> JSONResponse:
         if label not in ALLOWED_DATASET_LABELS:
             raise HTTPException(status_code=400, detail=f"unknown label {label}")
@@ -252,7 +287,7 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
                 fh.write(json.dumps(record) + "\n")
         return JSONResponse({"label": label, "added": len(payload.samples)})
 
-    @app.get("/api/dataset/summary")
+    @app.get("/api/dataset/summary", dependencies=[Depends(require_token)])
     def api_dataset_summary() -> JSONResponse:
         summary: dict[str, int] = {}
         for label in ALLOWED_DATASET_LABELS:
@@ -266,6 +301,11 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
 
     @app.websocket("/ws/control")
     async def ws_control(ws: WebSocket) -> None:
+        if auth_token is not None:
+            provided = ws.query_params.get("token")
+            if provided != auth_token:
+                await ws.close(code=4401, reason="unauthorized")
+                return
         await ws.accept()
         try:
             while True:
@@ -339,10 +379,32 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--sensitivity", type=float, default=1.2)
     parser.add_argument("--no-safe-start", action="store_true")
+    parser.add_argument(
+        "--auth-token",
+        default=os.environ.get("GESTURE_AUTH_TOKEN"),
+        help="可选 token；设了之后所有 /api/* 与 /ws/control 都校验。"
+        " 也可通过环境变量 GESTURE_AUTH_TOKEN 设置。Tunnel 暴露公网必备。",
+    )
+    parser.add_argument(
+        "--cors-origin",
+        action="append",
+        default=os.environ.get("GESTURE_CORS_ORIGINS", "").split(",") if os.environ.get("GESTURE_CORS_ORIGINS") else [],
+        help="允许跨域的前端 origin，可多次指定。例：--cors-origin https://gesture.pages.dev",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    app = create_app(sensitivity=args.sensitivity, safe_start=not args.no_safe_start)
+    cors_origins = [o.strip() for o in args.cors_origin if o and o.strip()]
+    if args.auth_token:
+        logging.info("auth token enabled (length=%d)", len(args.auth_token))
+    if cors_origins:
+        logging.info("CORS allowed origins: %s", cors_origins)
+    app = create_app(
+        sensitivity=args.sensitivity,
+        safe_start=not args.no_safe_start,
+        auth_token=args.auth_token or None,
+        cors_origins=cors_origins or None,
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

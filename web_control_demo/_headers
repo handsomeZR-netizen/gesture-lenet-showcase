@@ -1,0 +1,12 @@
+# 让 ONNX 与 MediaPipe 模型文件可以跨源访问 + 长缓存
+/*.onnx
+  Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *
+
+/*.task
+  Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *
+
+/models/*
+  Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *
