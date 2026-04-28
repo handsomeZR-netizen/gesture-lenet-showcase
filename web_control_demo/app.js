@@ -14,7 +14,10 @@ import {
   isModelLoaded,
   loadGestureModel,
 } from "./modules/gestureClassifier.js";
+import { InPageController } from "./modules/inPageController.js";
 import { LabelSmoother, SwipeDetector } from "./modules/temporalSmoother.js";
+
+const inPageController = new InPageController();
 
 const MP_VERSION = "0.10.33";
 const MP_VISION_MODULE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/vision_bundle.mjs`;
@@ -615,10 +618,21 @@ async function loop() {
 function dispatchEvent(label, confidence, anchor, handedness) {
   const binding = state.bindings[label];
   if (!binding || !binding.enabled) return;
-  if (state.testMode || state.demoMode) {
+  if (state.testMode) {
     const cn = GESTURE_LABELS_CN[label] || label;
-    const tag = state.demoMode ? "[演示]" : "[测试]";
-    showBubble(`${tag} ${cn} → ${actionLabel(binding.action)}`, "info");
+    showBubble(`[测试] ${cn} → ${actionLabel(binding.action)}`, "info");
+    state.triggerCount += 1;
+    ui.triggerCountValue.textContent = String(state.triggerCount);
+    return;
+  }
+  if (state.demoMode) {
+    // 没有本地后端时，把动作派给页面内控制器：在用户当前浏览器里真做
+    const ack = inPageController.handle(binding.action, { anchor, confidence });
+    if (ack.ok) {
+      showBubble(`${GESTURE_LABELS_CN[label] || label} → ${ack.message}`, "ok");
+    } else if (ack.message && !/未绑定|noop/.test(ack.message)) {
+      showBubble(ack.message, "warn");
+    }
     state.triggerCount += 1;
     ui.triggerCountValue.textContent = String(state.triggerCount);
     return;
@@ -813,23 +827,24 @@ async function setActiveModel(name) {
 
 function enterDemoMode() {
   state.demoMode = true;
-  state.testMode = true;
+  state.testMode = false; // 演示模式自带网页内真控制，不再强制 testMode
   if (ui.testMode) {
-    ui.testMode.checked = true;
-    ui.testMode.disabled = true;
+    ui.testMode.checked = false;
+    ui.testMode.disabled = false;
   }
-  setStatusPill(ui.wsState, "演示模式（无后端）", "warn");
-  setStatusPill(ui.controlState, "演示模式", "warn");
+  setStatusPill(ui.wsState, "网页内控制", "ok");
+  setStatusPill(ui.controlState, "网页内（无后端）", "active");
   setWarning(
-    "未检测到本地 Python 后端 — 已自动进入演示模式：识别和 UI 全部正常，但不会真的注入键鼠。" +
-    "若要真实控制电脑，请按 README 在本机运行 ./run_gesture_control.sh。",
+    "未检测到本地 Python 后端 — 已切换到「网页内控制」模式：" +
+    "手势直接控制当前浏览器的滚动、点击、视频播放、全屏、后退等。" +
+    "想要控制操作系统级（鼠标移到桌面、Alt+Tab、调系统音量）请在本机跑 ./run_gesture_control.sh。",
   );
-  showBubble("演示模式：动作仅显示，不真实发送", "warn");
+  showBubble("网页内控制：手势在你的浏览器里直接生效", "ok");
   if (state.actions.length === 0) {
     state.actions = buildDemoActions();
   }
   if (Object.keys(state.bindings).length === 0) {
-    state.bindings = buildDemoBindings();
+    state.bindings = buildInPageBindings();
   }
   if (state.models.length === 0) {
     state.models = [
@@ -898,8 +913,28 @@ async function loadInitialState() {
     });
     renderBindingsPanel();
   } catch (error) {
+    state.actions = buildDemoActions();
+    state.bindings = buildInPageBindings();
     enterDemoMode();
   }
+}
+
+// 演示模式下的默认绑定 — 全是网页内能做到的事，不出现 OS 级动作
+function buildInPageBindings() {
+  return {
+    open_palm: { action: "release", enabled: true },
+    point: { action: "move_cursor", enabled: true },
+    pinch: { action: "click_or_drag", enabled: true },
+    fist: { action: "press_escape", enabled: true },
+    victory: { action: "alt_tab", enabled: true },          // 在演示模式 = 全屏切换
+    ok: { action: "media_playpause", enabled: true },
+    thumbs_up: { action: "volume_up", enabled: true },
+    thumbs_down: { action: "volume_down", enabled: true },
+    three: { action: "show_desktop", enabled: true },        // 演示模式 = 滚到顶部
+    call: { action: "media_next", enabled: true },           // 演示模式 = 视频快进 10s
+    swipe_up: { action: "scroll_up", enabled: true },
+    swipe_down: { action: "scroll_down", enabled: true },
+  };
 }
 
 function bindControlClientEvents() {
