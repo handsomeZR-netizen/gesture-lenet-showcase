@@ -1,0 +1,334 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+:root {
+  --paper: #f7f4ea;
+  --paper-strong: #efe9d5;
+  --ink: #132a2c;
+  --ink-soft: #3c5d61;
+  --teal: #0f766e;
+  --teal-bright: #31c2b3;
+  --coral: #e5724a;
+  --gold: #d5a53e;
+  --panel: rgba(255, 251, 242, 0.74);
+  --panel-border: rgba(15, 118, 110, 0.18);
+  --shadow: 0 26px 70px rgba(19, 42, 44, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(49, 194, 179, 0.22), transparent 34%),
+    radial-gradient(circle at top right, rgba(229, 114, 74, 0.24), transparent 28%),
+    linear-gradient(180deg, #f9f6ef 0%, #f0eadb 100%);
+  color: var(--ink);
+  font-family: "Space Grotesk", "Ubuntu", sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.page-shell {
+  width: min(1380px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+.hero {
+  padding: 18px 10px 30px;
+}
+
+.eyebrow,
+.panel-kicker,
+.guide-step,
+.telemetry-label,
+.stage-title {
+  color: var(--ink-soft);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero h1 {
+  margin: 10px 0 12px;
+  max-width: 780px;
+  font-size: clamp(2.8rem, 5vw, 4.9rem);
+  line-height: 0.92;
+  letter-spacing: -0.05em;
+}
+
+.hero-copy {
+  max-width: 720px;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 1.04rem;
+  line-height: 1.6;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 22px;
+  flex-wrap: wrap;
+}
+
+.primary-button,
+.secondary-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 14px 22px;
+  cursor: pointer;
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.primary-button {
+  background: linear-gradient(135deg, var(--teal) 0%, var(--teal-bright) 100%);
+  color: white;
+  box-shadow: 0 18px 42px rgba(15, 118, 110, 0.3);
+}
+
+.secondary-button {
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--ink);
+  border: 1px solid rgba(19, 42, 44, 0.08);
+}
+
+.primary-button:hover,
+.secondary-button:hover {
+  transform: translateY(-2px);
+}
+
+.dashboard {
+  display: grid;
+  grid-template-columns: minmax(340px, 1.05fr) minmax(420px, 1fr);
+  gap: 22px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 28px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.camera-panel,
+.stage-panel {
+  padding: 20px;
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.panel-head h2 {
+  margin: 4px 0 0;
+  font-size: 1.6rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 9px 14px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.status-idle {
+  background: rgba(19, 42, 44, 0.08);
+  color: var(--ink-soft);
+}
+
+.status-ready {
+  background: rgba(49, 194, 179, 0.18);
+  color: var(--teal);
+}
+
+.status-active {
+  background: rgba(229, 114, 74, 0.16);
+  color: #9e4323;
+}
+
+.status-warning {
+  background: rgba(213, 165, 62, 0.16);
+  color: #8b6510;
+}
+
+.camera-stage {
+  position: relative;
+  margin-top: 18px;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(15, 118, 110, 0.18), rgba(255, 255, 255, 0.04)),
+    #15272a;
+}
+
+#cameraFeed,
+#overlayCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+#cameraFeed {
+  opacity: 0.92;
+}
+
+#overlayCanvas {
+  pointer-events: none;
+}
+
+.camera-overlay {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 18px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  background: rgba(247, 244, 234, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 18px 40px rgba(13, 36, 35, 0.22);
+}
+
+.overlay-title,
+.stage-title {
+  margin: 0 0 6px;
+  font-weight: 700;
+}
+
+.overlay-body,
+.stage-body,
+.gesture-guide p,
+.telemetry-detail {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.telemetry-card {
+  min-height: 108px;
+  padding: 15px 16px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(19, 42, 44, 0.06);
+}
+
+.telemetry-value {
+  margin: 12px 0 0;
+  font-size: 1.22rem;
+  font-weight: 700;
+}
+
+.gesture-guide {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.gesture-guide article {
+  padding: 18px;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 249, 239, 0.56));
+  border: 1px solid rgba(19, 42, 44, 0.06);
+}
+
+.gesture-guide h3 {
+  margin: 6px 0 8px;
+}
+
+.stage-wrapper {
+  position: relative;
+  margin-top: 18px;
+  min-height: 720px;
+  border-radius: 28px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 30% 18%, rgba(229, 114, 74, 0.2), transparent 24%),
+    radial-gradient(circle at 68% 20%, rgba(49, 194, 179, 0.22), transparent 28%),
+    linear-gradient(180deg, #0f2023 0%, #14292c 44%, #173639 100%);
+}
+
+#stageCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.stage-copy {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  max-width: 280px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  background: rgba(250, 244, 232, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.56);
+}
+
+@media (max-width: 1120px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-wrapper {
+    min-height: 540px;
+  }
+}
+
+@media (max-width: 720px) {
+  .page-shell {
+    width: min(100vw - 18px, 100%);
+    padding-top: 18px;
+  }
+
+  .camera-panel,
+  .stage-panel {
+    padding: 16px;
+  }
+
+  .telemetry-grid,
+  .gesture-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.2rem, 11vw, 3.5rem);
+  }
+
+  .stage-wrapper {
+    min-height: 420px;
+  }
+}

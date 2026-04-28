@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+PORT="${PORT:-8765}"
+HOST="${HOST:-127.0.0.1}"
+URL="http://${HOST}:${PORT}/web_control_demo/"
+
+python3 -m http.server "${PORT}" --bind "${HOST}" >/tmp/gesture_control_demo.log 2>&1 &
+SERVER_PID=$!
+
+cleanup() {
+  if kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
+    kill "${SERVER_PID}" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+sleep 1
+xdg-open "${URL}" >/dev/null 2>&1 || true
+
+echo "Serving gesture_control_demo at ${URL}"
+echo "Press Ctrl-C to stop the local server."
+
+wait "${SERVER_PID}"
