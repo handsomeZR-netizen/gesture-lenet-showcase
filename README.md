@@ -69,21 +69,32 @@
 
 ## 🚀 快速开始
 
-### 1️⃣ 一次性环境配置
+### ⚡ 最快路径（推荐）
+
+一行命令从零到能用：
 
 ```bash
-# 进入项目
-cd gesture-lenet-showcase
+./quickstart.sh
+```
 
+它会自动：检测 Conda 环境 → 装 Python 依赖 → 配 `/dev/uinput` 权限 → 把你加进 `input` 组 → 检查端口 → 用 `sg input` 派生 shell → 启动后端 → 打开浏览器。
+缺什么补什么，全程友好提示。
+
+---
+
+### 手动分步（如果你想了解每一步）
+
+#### 1️⃣ 一次性环境配置
+
+```bash
 # Conda 环境（约 3 分钟）
 ./install_env.sh
 
 # Linux 下让程序能注入键鼠（用 evdev / uinput）
 sudo bash setup_uinput.sh
-# 输出最后应显示：crw-rw---- 1 root input ... /dev/uinput
 ```
 
-### 2️⃣ 启动主程序
+#### 2️⃣ 启动主程序
 
 ```bash
 ./run_gesture_control.sh
