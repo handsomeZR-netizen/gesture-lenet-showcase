@@ -7,9 +7,10 @@ cd "$(dirname "$0")"
 # 当前进程的 supplementary groups 必须包含 input，否则 evdev 打不开 /dev/uinput。
 # 如果没有 input，就用 sg 重新派生一个带 input 组的 shell 再回来跑自己。
 if ! id -nG | tr ' ' '\n' | grep -qx input; then
-  if id -nG xzr 2>/dev/null | tr ' ' '\n' | grep -qx input || getent group input | grep -q "$USER"; then
-    echo "[info] 当前 shell 缺少 input 组，使用 sg input 重新派生一次..."
-    exec sg input -c "bash $(printf %q "$0") $*"
+  if getent group input | grep -q "$USER"; then
+    echo "[info] 当前 shell 缺少 input 组，使用 sg input + bash 重新派生..."
+    # sg 默认走 /bin/sh，显式指定 bash 才能用 source/数组等 bash 语法
+    exec sg input -c "/bin/bash $(printf %q "$0") $*"
   else
     echo "[warning] 当前用户不在 input 组，evdev 注入将不可用。" >&2
     echo "          请运行: sudo bash setup_uinput.sh （只需一次）" >&2

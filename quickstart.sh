@@ -134,8 +134,15 @@ echo
   done
 ) &
 
+PY_BIN="${HOME}/miniconda3/envs/${ENV_NAME}/bin/python"
+if [[ ! -x "${PY_BIN}" ]]; then
+  fail "找不到环境 python：${PY_BIN}"
+fi
+
 if [[ "${USE_SG}" == "1" ]]; then
-  exec sg input -c "source '${HOME}/miniconda3/bin/activate' ${ENV_NAME} && python -m control_server.server --host '${HOST}' --port '${PORT}'"
+  # sg 默认用 /bin/sh 解释命令，所以这里不能用 source / activate；
+  # 直接用 conda env 里的绝对路径 python，PYTHONPATH 自动找到 control_server。
+  exec sg input -c "cd '${PROJECT_DIR}' && '${PY_BIN}' -m control_server.server --host '${HOST}' --port '${PORT}'"
 else
-  exec python -m control_server.server --host "${HOST}" --port "${PORT}"
+  exec "${PY_BIN}" -m control_server.server --host "${HOST}" --port "${PORT}"
 fi
