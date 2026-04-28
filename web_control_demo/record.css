@@ -1,0 +1,97 @@
+.recording-banner {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 18px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  background: rgba(7, 14, 19, 0.86);
+  border: 1px solid rgba(255, 190, 92, 0.4);
+  backdrop-filter: blur(10px);
+}
+.recording-text {
+  margin: 0 0 10px;
+  color: var(--amber);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.recording-progress {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.recording-progress-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--amber), #ffe1a8);
+  transition: width 60ms linear;
+}
+
+.record-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.record-actions button {
+  flex: 1 1 220px;
+}
+
+.record-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+.record-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+.record-row.is-active {
+  border-color: rgba(255, 190, 92, 0.45);
+  background: rgba(255, 190, 92, 0.06);
+}
+.record-row.is-done {
+  border-color: rgba(61, 215, 194, 0.4);
+  background: rgba(61, 215, 194, 0.05);
+}
+.record-row .row-name {
+  font-weight: 600;
+}
+.record-row .row-count {
+  font-family: "JetBrains Mono", monospace;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+.record-row .row-state {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.record-row.is-done .row-state {
+  color: var(--teal);
+}
+.record-row.is-active .row-state {
+  color: var(--amber);
+}
+
+.code-block {
+  margin: 8px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(8, 17, 23, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.85rem;
+  color: var(--ink);
+  overflow-x: auto;
+}

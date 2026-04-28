@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>手势数据采集向导</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./record.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">手势控制 · 数据采集向导</p>
+          <h1>5 分钟训练你自己的手势模型</h1>
+          <p class="hero-copy">
+            10 个手势，每个录 <strong>250 帧（约 8 秒）</strong>。期间请轻微移动手部位置、远近和角度，提升模型泛化能力。
+            采完后回到主界面运行训练脚本即可让识别更准确。
+          </p>
+        </div>
+        <div class="control-block">
+          <div class="status-row">
+            <span id="cameraState" class="status-pill status-idle">摄像头未启动</span>
+            <span id="progressState" class="status-pill status-idle">未开始</span>
+          </div>
+          <div class="hero-actions">
+            <button id="startCamera" class="primary-button" type="button">启动摄像头</button>
+            <a class="ghost-button" href="./index.html">返回主界面</a>
+          </div>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="panel live-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">实时输入</p>
+              <h2 id="currentLabel">准备就绪</h2>
+            </div>
+            <p class="panel-note" id="currentTip">点「启动摄像头」开始</p>
+          </div>
+
+          <div class="camera-stage">
+            <video id="cameraFeed" playsinline muted></video>
+            <canvas id="overlayCanvas"></canvas>
+            <div id="cameraOverlay" class="camera-overlay">
+              <p class="overlay-title">摄像头未启动</p>
+              <p class="overlay-body">请允许浏览器访问摄像头。如已启动主界面也允许过，则会复用授权。</p>
+            </div>
+            <div class="recording-banner" id="recordingBanner" hidden>
+              <p class="recording-text" id="recordingText">准备录制…</p>
+              <div class="recording-progress">
+                <div class="recording-progress-fill" id="recordingProgress"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="record-actions">
+            <button id="recordButton" class="primary-button" type="button" disabled>开始录制当前手势</button>
+            <button id="skipButton" class="ghost-button" type="button">跳过这个手势</button>
+          </div>
+        </section>
+
+        <section class="panel bindings-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">采集进度</p>
+              <h2>10 个手势数据集</h2>
+            </div>
+            <p class="panel-note">绿色=已采足；橙色=正在采；灰色=待采</p>
+          </div>
+          <div class="record-list" id="recordList"></div>
+          <div class="record-link" id="finishedHint" hidden>
+            <p>全部录完后，回到终端运行：</p>
+            <pre class="code-block"><code>python train_gesture_mlp.py
+python export_onnx.py</code></pre>
+            <p>训练约 1 分钟，导出 ONNX 后刷新主界面即可使用。</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./record.js"></script>
+  </body>
+</html>

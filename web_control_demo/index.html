@@ -1,125 +1,88 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gesture Control Demo</title>
+    <title>手势控制 · 控制中枢</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
-    <div class="page-shell">
-      <header class="hero">
-        <p class="eyebrow">Gesture Control Demo</p>
-        <h1>Control a living 3D sphere with your hands.</h1>
-        <p class="hero-copy">
-          Default mode now uses hand keypoints and rules in the browser. The old
-          letter classifier remains available as a legacy reference, but this page
-          is the new mainline demo.
-        </p>
-        <div class="hero-actions">
-          <button id="startButton" class="primary-button" type="button">
-            Start Camera
-          </button>
-          <button id="resetButton" class="secondary-button" type="button">
-            Reset Sphere
-          </button>
+  <body class="single-page">
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="header-brand">
+          <span class="brand-mark"></span>
+          <div>
+            <p class="brand-eyebrow">Gesture Control · 课程项目优化版</p>
+            <h1 class="brand-title">手势控制中枢</h1>
+          </div>
+        </div>
+        <div class="header-status">
+          <span id="cameraState" class="status-pill status-idle">摄像头未启动</span>
+          <span id="controlState" class="status-pill status-idle">未连接</span>
+          <span id="wsState" class="status-pill status-idle">后端离线</span>
+        </div>
+        <div class="header-actions">
+          <button id="startButton" class="primary-button" type="button">启动摄像头</button>
+          <button id="unlockButton" class="ghost-button" type="button">解锁</button>
+          <button id="pauseButton" class="ghost-button" type="button">暂停</button>
+          <label class="test-toggle">
+            <input id="testMode" type="checkbox" />
+            <span>测试模式</span>
+          </label>
         </div>
       </header>
 
-      <main class="dashboard">
-        <section class="panel camera-panel">
-          <div class="panel-head">
-            <div>
-              <p class="panel-kicker">Live Camera</p>
-              <h2>Hand tracking</h2>
-            </div>
-            <span id="cameraState" class="status-pill status-idle">booting</span>
-          </div>
+      <p id="warningStrip" class="warning-strip" hidden></p>
 
+      <main class="app-main">
+        <section class="live-panel">
           <div class="camera-stage">
             <video id="cameraFeed" playsinline muted></video>
             <canvas id="overlayCanvas"></canvas>
             <div id="cameraOverlay" class="camera-overlay">
-              <p class="overlay-title">Camera inactive</p>
-              <p class="overlay-body">
-                Start the demo, allow webcam access, then use one-hand pinch to drag
-                and two-hand pinch to scale and rotate.
-              </p>
+              <p class="overlay-title">摄像头未启动</p>
+              <p class="overlay-body">点上方「启动摄像头」并允许浏览器访问。</p>
+              <button id="overlayRetry" class="ghost-button overlay-retry" type="button" hidden>重试</button>
             </div>
-          </div>
+            <div id="actionBubble" class="action-bubble" aria-live="polite"></div>
 
-          <div class="telemetry-grid">
-            <article class="telemetry-card">
-              <p class="telemetry-label">Mode</p>
-              <p id="modeValue" class="telemetry-value">booting</p>
-            </article>
-            <article class="telemetry-card">
-              <p class="telemetry-label">Detail</p>
-              <p id="detailValue" class="telemetry-value telemetry-detail">
-                Waiting for initialization
-              </p>
-            </article>
-            <article class="telemetry-card">
-              <p class="telemetry-label">Hands</p>
-              <p id="handsValue" class="telemetry-value">0</p>
-            </article>
-            <article class="telemetry-card">
-              <p class="telemetry-label">Scale</p>
-              <p id="scaleValue" class="telemetry-value">1.00</p>
-            </article>
-            <article class="telemetry-card">
-              <p class="telemetry-label">Rotation</p>
-              <p id="rotationValue" class="telemetry-value">0.50 rad</p>
-            </article>
-            <article class="telemetry-card">
-              <p class="telemetry-label">Gesture</p>
-              <p id="gestureValue" class="telemetry-value">no hand</p>
-            </article>
-          </div>
-
-          <div class="gesture-guide">
-            <article>
-              <p class="guide-step">01</p>
-              <h3>Ready</h3>
-              <p>Show one clear open hand to enter the ready state.</p>
-            </article>
-            <article>
-              <p class="guide-step">02</p>
-              <h3>Drag</h3>
-              <p>Pinch thumb and index finger with one hand, then move it.</p>
-            </article>
-            <article>
-              <p class="guide-step">03</p>
-              <h3>Scale + Rotate</h3>
-              <p>Pinch with both hands. Change distance to zoom and angle to rotate.</p>
-            </article>
-            <article>
-              <p class="guide-step">04</p>
-              <h3>Reset</h3>
-              <p>Hold both hands open for about 1.2 seconds to recenter the sphere.</p>
-            </article>
+            <div class="camera-hud">
+              <div class="hud-gesture">
+                <p class="hud-kicker">当前手势</p>
+                <p id="gestureLabel" class="hud-gesture-value">等待手势</p>
+                <div class="confidence-track">
+                  <div id="confidenceBar" class="confidence-fill"></div>
+                </div>
+                <p id="confidenceValue" class="hud-sub">0%</p>
+              </div>
+              <div class="hud-stats">
+                <div><span class="hud-kicker">FPS</span><span id="fpsValue">0.0</span></div>
+                <div><span class="hud-kicker">延迟</span><span id="latencyValue">0 ms</span></div>
+                <div><span class="hud-kicker">手部</span><span id="handsValue">0</span></div>
+                <div><span class="hud-kicker">触发</span><span id="triggerCountValue">0</span></div>
+                <div><span class="hud-kicker">屏幕</span><span id="screenSizeValue">— × —</span></div>
+                <div><span class="hud-kicker">指针</span><span id="cursorValue">(—, —)</span></div>
+                <div><span class="hud-kicker">运行</span><span id="uptimeValue">0.0 s</span></div>
+                <div><span class="hud-kicker">最近</span><span id="lastActionValue" class="hud-truncate">—</span></div>
+              </div>
+            </div>
           </div>
         </section>
 
-        <section class="panel stage-panel">
-          <div class="panel-head">
+        <aside class="bindings-pane">
+          <div class="bindings-head">
             <div>
-              <p class="panel-kicker">Interactive Stage</p>
-              <h2>3D sphere</h2>
+              <p class="panel-kicker">手势绑定</p>
+              <h2>手势 → 计算机动作</h2>
             </div>
-            <span id="runtimeState" class="status-pill status-idle">idle</span>
+            <a class="record-pill" href="./record.html" title="录制自己的手势数据集">录制</a>
           </div>
-          <div class="stage-wrapper">
-            <canvas id="stageCanvas"></canvas>
-            <div class="stage-copy">
-              <p class="stage-title">Current pipeline</p>
-              <p class="stage-body">
-                Browser webcam -> MediaPipe Hand Landmarker -> gesture rules -> sphere
-                transform.
-              </p>
-            </div>
-          </div>
-        </section>
+          <div id="bindingsList" class="bindings-list"></div>
+          <p class="bindings-foot">
+            按 <kbd>Esc</kbd> 物理键 · 或鼠标拖到屏幕角 · 立即停止注入。配置存于
+            <code>~/.config/gesture_control/bindings.json</code>。
+          </p>
+        </aside>
       </main>
     </div>
 

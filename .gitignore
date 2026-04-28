@@ -24,4 +24,9 @@ models/hand_landmarker.task
 *.ckpt
 
 data/raw/
+data/gesture_keypoints/
+data/gesture_keypoints_seed/
 *.zip
+
+# user-specific test fixtures
+web_control_demo/modules/features.fixture.json

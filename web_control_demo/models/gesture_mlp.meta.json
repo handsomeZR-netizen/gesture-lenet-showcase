@@ -1,0 +1,17 @@
+{
+  "labels": [
+    "open_palm",
+    "point",
+    "pinch",
+    "fist",
+    "victory",
+    "ok",
+    "thumbs_up",
+    "thumbs_down",
+    "three",
+    "call"
+  ],
+  "feature_dim": 63,
+  "input_name": "features",
+  "output_name": "logits"
+}

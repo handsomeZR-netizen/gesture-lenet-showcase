@@ -1,12 +1,25 @@
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js";
+// Main orchestration for the gesture control center.
+//
+// Pipeline per frame:
+//   1. MediaPipe Tasks Vision detects 21 hand landmarks
+//   2. gestureClassifier scores them with the trained MLP (or rule fallback)
+//   3. LabelSmoother + SwipeDetector produce a stable label / dynamic event
+//   4. controlClient sends the gesture event to the Python backend over WS
+//   5. UI updates: skeleton overlay, telemetry, bindings panel state, action bubble
 
-const MP_TASKS_VERSION = "0.10.33";
-const MP_TASKS_VISION_MODULE =
-  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_TASKS_VERSION}/vision_bundle.mjs`;
-const MP_TASKS_WASM_ROOT =
-  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_TASKS_VERSION}/wasm`;
+import { ControlClient } from "./modules/controlClient.js";
+import {
+  classifyByRule,
+  classifyLandmarks,
+  isModelLoaded,
+  loadGestureModel,
+} from "./modules/gestureClassifier.js";
+import { LabelSmoother, SwipeDetector } from "./modules/temporalSmoother.js";
+
+const MP_VERSION = "0.10.33";
+const MP_VISION_MODULE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/vision_bundle.mjs`;
+const MP_WASM_ROOT = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/wasm`;
 const HAND_MODEL_PATH = "../models/hand_landmarker.task";
-
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -15,647 +28,726 @@ const HAND_CONNECTIONS = [
   [13, 17], [0, 17], [17, 18], [18, 19], [19, 20],
 ];
 
-const LANDMARK_INDEX = {
-  wrist: 0,
-  thumbTip: 4,
-  indexMcp: 5,
-  indexTip: 8,
-  middleMcp: 9,
-  middleTip: 12,
-  ringTip: 16,
-  pinkyMcp: 17,
-  pinkyTip: 20,
+const GESTURE_LABELS_CN = {
+  open_palm: "张开手掌",
+  point: "食指指向",
+  pinch: "捏合",
+  fist: "握拳",
+  victory: "V 字",
+  ok: "OK 圈",
+  thumbs_up: "拇指向上",
+  thumbs_down: "拇指向下",
+  three: "三指",
+  call: "电话手势",
+  swipe_up: "整手向上划",
+  swipe_down: "整手向下划",
+  swipe_left: "整手向左划",
+  swipe_right: "整手向右划",
 };
 
-const defaultSphere = {
-  x: 0,
-  y: 0,
-  scale: 1,
-  rotX: 0.35,
-  rotY: 0.55,
-  rotZ: -0.12,
+// 给绑定行右下角的提示文案。静态手势靠 MLP 直接分类；动态手势靠 0.4s 内
+// 手腕的位移轨迹检测（像在镜头前快速划一下）。
+const GESTURE_HINTS_CN = {
+  open_palm: "五指自然张开",
+  point: "仅食指竖起",
+  pinch: "拇指食指轻轻捏在一起",
+  fist: "整只手握拳",
+  victory: "食指中指 V 字",
+  ok: "拇指食指捏成圈，其他三指张开",
+  thumbs_up: "握拳后竖大拇指",
+  thumbs_down: "拇指朝下",
+  three: "食指中指无名指竖起",
+  call: "拇指与小指伸出",
+  swipe_up: "动态：在镜头前把手快速向上划过",
+  swipe_down: "动态：在镜头前把手快速向下划过",
+  swipe_left: "动态：在镜头前把手快速向左划过",
+  swipe_right: "动态：在镜头前把手快速向右划过",
 };
+
+const STATIC_LABELS = [
+  "open_palm",
+  "point",
+  "pinch",
+  "fist",
+  "victory",
+  "ok",
+  "thumbs_up",
+  "thumbs_down",
+  "three",
+  "call",
+];
+
+const DYNAMIC_LABELS = ["swipe_up", "swipe_down", "swipe_left", "swipe_right"];
+
+const ui = {
+  startButton: document.getElementById("startButton"),
+  unlockButton: document.getElementById("unlockButton"),
+  pauseButton: document.getElementById("pauseButton"),
+  testMode: document.getElementById("testMode"),
+  cameraState: document.getElementById("cameraState"),
+  controlState: document.getElementById("controlState"),
+  wsState: document.getElementById("wsState"),
+  warningStrip: document.getElementById("warningStrip"),
+  cameraOverlay: document.getElementById("cameraOverlay"),
+  overlayRetry: document.getElementById("overlayRetry"),
+  actionBubble: document.getElementById("actionBubble"),
+  gestureLabel: document.getElementById("gestureLabel"),
+  confidenceBar: document.getElementById("confidenceBar"),
+  confidenceValue: document.getElementById("confidenceValue"),
+  fpsValue: document.getElementById("fpsValue"),
+  latencyValue: document.getElementById("latencyValue"),
+  handsValue: document.getElementById("handsValue"),
+  uptimeValue: document.getElementById("uptimeValue"),
+  lastActionValue: document.getElementById("lastActionValue"),
+  screenSizeValue: document.getElementById("screenSizeValue"),
+  cursorValue: document.getElementById("cursorValue"),
+  triggerCountValue: document.getElementById("triggerCountValue"),
+  bindingsList: document.getElementById("bindingsList"),
+};
+
+const video = document.getElementById("cameraFeed");
+const overlayCanvas = document.getElementById("overlayCanvas");
+const overlayContext = overlayCanvas.getContext("2d");
 
 const state = {
   handLandmarker: null,
   videoReady: false,
   runtimeStarted: false,
   lastVideoTime: -1,
-  interactionMode: "booting",
-  interactionDetail: "Loading browser-side hand tracker",
-  gestureLabel: "no hand",
-  dragAnchor: null,
-  dualAnchor: null,
-  resetHoldStartedAt: 0,
-  lastDetectionAt: 0,
-  sphereCurrent: { ...defaultSphere },
-  sphereTarget: { ...defaultSphere },
-  glow: 0,
-  glowTarget: 0,
+  fps: 0,
+  latencyMs: 0,
+  uptimeStartedAt: 0,
+  triggerCount: 0,
+  smoothedLabel: null,
+  smoothedConfidence: 0,
+  bindings: {},
+  actions: [],
+  testMode: false,
+  pendingActionLabel: null,
+  controlSnapshot: null,
 };
 
-const ui = {
-  startButton: document.getElementById("startButton"),
-  resetButton: document.getElementById("resetButton"),
-  cameraState: document.getElementById("cameraState"),
-  runtimeState: document.getElementById("runtimeState"),
-  modeValue: document.getElementById("modeValue"),
-  detailValue: document.getElementById("detailValue"),
-  handsValue: document.getElementById("handsValue"),
-  scaleValue: document.getElementById("scaleValue"),
-  rotationValue: document.getElementById("rotationValue"),
-  gestureValue: document.getElementById("gestureValue"),
-  cameraOverlay: document.getElementById("cameraOverlay"),
-};
+const smoother = new LabelSmoother();
+const swipe = new SwipeDetector();
+const controlClient = new ControlClient({ url: deriveWsUrl() });
 
-const video = document.getElementById("cameraFeed");
-const overlayCanvas = document.getElementById("overlayCanvas");
-const overlayContext = overlayCanvas.getContext("2d");
-const stageCanvas = document.getElementById("stageCanvas");
-
-let renderer;
-let scene;
-let camera;
-let orbGroup;
-let orbCore;
-let orbShell;
-let orbRing;
-let starField;
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
+function deriveWsUrl() {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws/control`;
 }
 
-function lerp(a, b, t) {
-  return a + (b - a) * t;
+function setStatusPill(el, text, kind) {
+  el.textContent = text;
+  el.className = `status-pill status-${kind}`;
 }
 
-function distance2d(a, b) {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return Math.hypot(dx, dy);
+function showBubble(message, kind = "info") {
+  ui.actionBubble.textContent = message;
+  ui.actionBubble.dataset.kind = kind;
+  ui.actionBubble.classList.add("visible");
+  clearTimeout(ui.actionBubble._hideTimer);
+  ui.actionBubble._hideTimer = setTimeout(() => {
+    ui.actionBubble.classList.remove("visible");
+  }, 1100);
 }
 
-function midpoint(a, b) {
-  return {
-    x: (a.x + b.x) * 0.5,
-    y: (a.y + b.y) * 0.5,
-  };
-}
-
-function updateStatusPill(element, text, tone) {
-  element.textContent = text;
-  element.className = "status-pill";
-  if (tone === "active") {
-    element.classList.add("status-active");
-  } else if (tone === "ready") {
-    element.classList.add("status-ready");
-  } else if (tone === "warning") {
-    element.classList.add("status-warning");
-  } else {
-    element.classList.add("status-idle");
-  }
-}
-
-function updateHud(handCount) {
-  ui.modeValue.textContent = state.interactionMode;
-  ui.detailValue.textContent = state.interactionDetail;
-  ui.handsValue.textContent = String(handCount);
-  ui.scaleValue.textContent = state.sphereTarget.scale.toFixed(2);
-  ui.rotationValue.textContent = `${state.sphereTarget.rotY.toFixed(2)} rad`;
-  ui.gestureValue.textContent = state.gestureLabel;
-
-  const tone =
-    state.interactionMode === "drag" || state.interactionMode === "scale_rotate"
-      ? "active"
-      : state.interactionMode === "ready"
-        ? "ready"
-        : state.interactionMode === "reset_hold"
-          ? "warning"
-          : "idle";
-  updateStatusPill(ui.runtimeState, state.interactionMode, tone);
-  updateStatusPill(ui.cameraState, state.videoReady ? "camera ready" : "camera off", state.videoReady ? "ready" : "idle");
-}
-
-function setOverlayMessage(title, body) {
-  ui.cameraOverlay.innerHTML = `
-    <p class="overlay-title">${title}</p>
-    <p class="overlay-body">${body}</p>
-  `;
-}
-
-function resetSphere() {
-  state.sphereTarget = { ...defaultSphere };
-  state.dragAnchor = null;
-  state.dualAnchor = null;
-  state.glowTarget = 0.25;
-}
-
-function summariseHand(landmarks, handedness) {
-  const renderPoints = landmarks.map((landmark) => ({
-    x: landmark.x,
-    y: landmark.y,
-    z: landmark.z,
-  }));
-  const controlPoints = landmarks.map((landmark) => ({
-    x: 1 - landmark.x,
-    y: landmark.y,
-    z: landmark.z,
-  }));
-
-  const wrist = controlPoints[LANDMARK_INDEX.wrist];
-  const thumbTip = controlPoints[LANDMARK_INDEX.thumbTip];
-  const indexTip = controlPoints[LANDMARK_INDEX.indexTip];
-  const middleTip = controlPoints[LANDMARK_INDEX.middleTip];
-  const ringTip = controlPoints[LANDMARK_INDEX.ringTip];
-  const pinkyTip = controlPoints[LANDMARK_INDEX.pinkyTip];
-  const middleMcp = controlPoints[LANDMARK_INDEX.middleMcp];
-  const indexMcp = controlPoints[LANDMARK_INDEX.indexMcp];
-  const pinkyMcp = controlPoints[LANDMARK_INDEX.pinkyMcp];
-
-  const palmWidth = Math.max(distance2d(indexMcp, pinkyMcp), 0.06);
-  const palmHeight = Math.max(distance2d(wrist, middleMcp), 0.06);
-  const handScale = Math.max((palmWidth + palmHeight) * 0.5, 0.08);
-  const pinchDistance = distance2d(thumbTip, indexTip) / handScale;
-  const pinchStrength = clamp(1 - pinchDistance / 0.62, 0, 1);
-
-  const extensionScore =
-    (
-      distance2d(indexTip, wrist) +
-      distance2d(middleTip, wrist) +
-      distance2d(ringTip, wrist) +
-      distance2d(pinkyTip, wrist)
-    ) /
-    (4 * handScale);
-
-  const isPinched = pinchDistance < 0.42;
-  const openPalm = extensionScore > 1.42 && pinchDistance > 0.56;
-
-  return {
-    handedness,
-    renderPoints,
-    controlPoints,
-    pinchPoint: midpoint(thumbTip, indexTip),
-    pinchDistance,
-    pinchStrength,
-    openPalm,
-    isPinched,
-  };
-}
-
-function beginDrag(hand) {
-  state.dragAnchor = {
-    handX: hand.pinchPoint.x,
-    handY: hand.pinchPoint.y,
-    sphereX: state.sphereTarget.x,
-    sphereY: state.sphereTarget.y,
-  };
-}
-
-function applyDrag(hand) {
-  if (!state.dragAnchor) {
-    beginDrag(hand);
-  }
-  const dx = hand.pinchPoint.x - state.dragAnchor.handX;
-  const dy = hand.pinchPoint.y - state.dragAnchor.handY;
-  state.sphereTarget.x = clamp(state.dragAnchor.sphereX + dx * 5.2, -2.35, 2.35);
-  state.sphereTarget.y = clamp(state.dragAnchor.sphereY - dy * 3.9, -1.7, 1.7);
-  state.interactionMode = "drag";
-  state.interactionDetail = "Single-hand pinch: move to drag the sphere";
-  state.gestureLabel = "pinch drag";
-  state.glowTarget = 0.7;
-}
-
-function beginDualTransform(leftHand, rightHand) {
-  const center = midpoint(leftHand.pinchPoint, rightHand.pinchPoint);
-  state.dualAnchor = {
-    center,
-    distance: Math.max(distance2d(leftHand.pinchPoint, rightHand.pinchPoint), 0.08),
-    angle: Math.atan2(
-      rightHand.pinchPoint.y - leftHand.pinchPoint.y,
-      rightHand.pinchPoint.x - leftHand.pinchPoint.x,
-    ),
-    x: state.sphereTarget.x,
-    y: state.sphereTarget.y,
-    scale: state.sphereTarget.scale,
-    rotX: state.sphereTarget.rotX,
-    rotY: state.sphereTarget.rotY,
-  };
-}
-
-function applyDualTransform(leftHand, rightHand) {
-  if (!state.dualAnchor) {
-    beginDualTransform(leftHand, rightHand);
-  }
-
-  const currentCenter = midpoint(leftHand.pinchPoint, rightHand.pinchPoint);
-  const currentDistance = Math.max(distance2d(leftHand.pinchPoint, rightHand.pinchPoint), 0.08);
-  const currentAngle = Math.atan2(
-    rightHand.pinchPoint.y - leftHand.pinchPoint.y,
-    rightHand.pinchPoint.x - leftHand.pinchPoint.x,
-  );
-  const anchor = state.dualAnchor;
-
-  state.sphereTarget.scale = clamp(anchor.scale * (currentDistance / anchor.distance), 0.55, 2.8);
-  state.sphereTarget.rotY = anchor.rotY + (currentAngle - anchor.angle) * 1.8;
-  state.sphereTarget.rotX = clamp(anchor.rotX + (currentCenter.y - anchor.center.y) * 3.4, -1.3, 1.3);
-  state.sphereTarget.x = clamp(anchor.x + (currentCenter.x - anchor.center.x) * 4.8, -2.35, 2.35);
-  state.sphereTarget.y = clamp(anchor.y - (currentCenter.y - anchor.center.y) * 3.8, -1.7, 1.7);
-  state.interactionMode = "scale_rotate";
-  state.interactionDetail = "Two-hand pinch: change distance to zoom and angle to rotate";
-  state.gestureLabel = "dual pinch";
-  state.glowTarget = 1.0;
-}
-
-function clearTransientAnchors() {
-  state.dragAnchor = null;
-  state.dualAnchor = null;
-}
-
-function drawOverlay(hands) {
-  const { width, height } = overlayCanvas;
-  overlayContext.clearRect(0, 0, width, height);
-
-  if (!hands.length) {
-    overlayContext.strokeStyle = "rgba(255,255,255,0.26)";
-    overlayContext.lineWidth = 2;
-    overlayContext.setLineDash([14, 10]);
-    overlayContext.strokeRect(width * 0.18, height * 0.16, width * 0.64, height * 0.68);
-    overlayContext.setLineDash([]);
+function setOverlayMessage(text, { showRetry = false } = {}) {
+  if (!text) {
+    ui.cameraOverlay.hidden = true;
+    if (ui.overlayRetry) ui.overlayRetry.hidden = true;
     return;
   }
-
-  hands.forEach((hand) => {
-    overlayContext.lineWidth = 3;
-    overlayContext.strokeStyle = "rgba(59, 226, 205, 0.9)";
-    overlayContext.fillStyle = "rgba(255, 247, 214, 0.95)";
-
-    HAND_CONNECTIONS.forEach(([start, end]) => {
-      const startPoint = hand.renderPoints[start];
-      const endPoint = hand.renderPoints[end];
-      overlayContext.beginPath();
-      overlayContext.moveTo(startPoint.x * width, startPoint.y * height);
-      overlayContext.lineTo(endPoint.x * width, endPoint.y * height);
-      overlayContext.stroke();
-    });
-
-    hand.renderPoints.forEach((point) => {
-      overlayContext.beginPath();
-      overlayContext.arc(point.x * width, point.y * height, 5, 0, Math.PI * 2);
-      overlayContext.fill();
-    });
-
-    const rawPinchX = (1 - hand.pinchPoint.x) * width;
-    const rawPinchY = hand.pinchPoint.y * height;
-    overlayContext.beginPath();
-    overlayContext.arc(rawPinchX, rawPinchY, 10, 0, Math.PI * 2);
-    overlayContext.fillStyle = hand.isPinched ? "rgba(229, 114, 74, 0.95)" : "rgba(49, 194, 179, 0.95)";
-    overlayContext.fill();
-
-    overlayContext.fillStyle = "rgba(255, 255, 255, 0.94)";
-    overlayContext.font = "600 18px 'JetBrains Mono'";
-    overlayContext.fillText(
-      `${hand.handedness || "Hand"} ${hand.isPinched ? "pinch" : hand.openPalm ? "ready" : "tracking"}`,
-      rawPinchX + 14,
-      rawPinchY - 12,
-    );
-  });
+  ui.cameraOverlay.hidden = false;
+  ui.cameraOverlay.querySelector(".overlay-title").textContent = text.title || "提示";
+  ui.cameraOverlay.querySelector(".overlay-body").textContent = text.body || "";
+  if (ui.overlayRetry) ui.overlayRetry.hidden = !showRetry;
 }
 
-function processHands(result, nowMs) {
-  const hands = (result.landmarks || []).map((landmarks, index) => {
-    const handednessLabel =
-      result.handednesses?.[index]?.[0]?.displayName ||
-      result.handednesses?.[index]?.[0]?.categoryName ||
-      "";
-    return summariseHand(landmarks, handednessLabel);
-  });
-
-  hands.sort((a, b) => a.pinchPoint.x - b.pinchPoint.x);
-
-  if (!hands.length) {
-    clearTransientAnchors();
-    state.resetHoldStartedAt = 0;
-    state.interactionMode = "idle";
-    state.interactionDetail = "Show one open hand to enter ready mode";
-    state.gestureLabel = "no hand";
-    state.glowTarget = 0;
-    drawOverlay([]);
-    updateHud(0);
+function setWarning(message) {
+  if (!message) {
+    ui.warningStrip.hidden = true;
     return;
   }
-
-  state.lastDetectionAt = nowMs;
-  ui.cameraOverlay.style.display = "none";
-
-  const pinchedHands = hands.filter((hand) => hand.isPinched);
-  const allOpen = hands.length === 2 && hands.every((hand) => hand.openPalm);
-
-  if (hands.length >= 2 && pinchedHands.length >= 2) {
-    state.dragAnchor = null;
-    state.resetHoldStartedAt = 0;
-    applyDualTransform(hands[0], hands[1]);
-  } else if (allOpen) {
-    clearTransientAnchors();
-    if (!state.resetHoldStartedAt) {
-      state.resetHoldStartedAt = nowMs;
-    }
-    const heldForSeconds = (nowMs - state.resetHoldStartedAt) / 1000;
-    state.interactionMode = "reset_hold";
-    state.interactionDetail = `Hold both open hands for ${Math.max(0, 1.2 - heldForSeconds).toFixed(1)}s to reset`;
-    state.gestureLabel = "reset hold";
-    state.glowTarget = 0.25;
-    if (heldForSeconds >= 1.2) {
-      resetSphere();
-      state.interactionMode = "ready";
-      state.interactionDetail = "Sphere reset. Pinch again to continue controlling.";
-      state.gestureLabel = "reset complete";
-      state.resetHoldStartedAt = 0;
-    }
-  } else if (pinchedHands.length === 1) {
-    state.dualAnchor = null;
-    state.resetHoldStartedAt = 0;
-    applyDrag(pinchedHands[0]);
-  } else if (hands.some((hand) => hand.openPalm)) {
-    clearTransientAnchors();
-    state.resetHoldStartedAt = 0;
-    state.interactionMode = "ready";
-    state.interactionDetail = "Open hand detected. Pinch thumb and index finger to drag.";
-    state.gestureLabel = "ready palm";
-    state.glowTarget = 0.18;
-  } else {
-    clearTransientAnchors();
-    state.resetHoldStartedAt = 0;
-    state.interactionMode = "tracking";
-    state.interactionDetail = "Hand detected. Open your palm or pinch more clearly.";
-    state.gestureLabel = "tracking";
-    state.glowTarget = 0.1;
-  }
-
-  drawOverlay(hands);
-  updateHud(hands.length);
+  ui.warningStrip.textContent = message;
+  ui.warningStrip.hidden = false;
 }
 
-function syncOverlaySize() {
-  const rect = overlayCanvas.getBoundingClientRect();
-  const deviceScale = window.devicePixelRatio || 1;
-  const width = Math.round(rect.width * deviceScale);
-  const height = Math.round(rect.height * deviceScale);
-  if (overlayCanvas.width !== width || overlayCanvas.height !== height) {
-    overlayCanvas.width = width;
-    overlayCanvas.height = height;
+async function loadVisionModule() {
+  try {
+    const mod = await import(/* @vite-ignore */ MP_VISION_MODULE);
+    return mod;
+  } catch (error) {
+    console.error("failed to load mediapipe vision", error);
+    setOverlayMessage({
+      title: "加载手部模型失败",
+      body: "请检查网络是否能访问 jsdelivr CDN。",
+    });
+    throw error;
   }
 }
 
-function initThree() {
-  renderer = new THREE.WebGLRenderer({
-    canvas: stageCanvas,
-    antialias: true,
-    alpha: true,
-  });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(42, 1, 0.1, 80);
-  camera.position.set(0, 0.6, 7.6);
-
-  const ambient = new THREE.HemisphereLight(0xfbf8ef, 0x0e1e21, 1.2);
-  scene.add(ambient);
-
-  const keyLight = new THREE.DirectionalLight(0xfff3d1, 1.6);
-  keyLight.position.set(4.6, 6.2, 5.2);
-  scene.add(keyLight);
-
-  const rimLight = new THREE.PointLight(0x31c2b3, 3.8, 22);
-  rimLight.position.set(-4.2, 2.8, 4.2);
-  scene.add(rimLight);
-
-  orbGroup = new THREE.Group();
-  scene.add(orbGroup);
-
-  orbCore = new THREE.Mesh(
-    new THREE.SphereGeometry(1.18, 72, 72),
-    new THREE.MeshPhysicalMaterial({
-      color: 0xe8b76d,
-      roughness: 0.16,
-      metalness: 0.08,
-      transmission: 0.08,
-      clearcoat: 1,
-      clearcoatRoughness: 0.12,
-      emissive: 0x0f766e,
-      emissiveIntensity: 0.14,
-    }),
-  );
-  orbGroup.add(orbCore);
-
-  orbShell = new THREE.Mesh(
-    new THREE.SphereGeometry(1.34, 48, 48),
-    new THREE.MeshBasicMaterial({
-      color: 0x7de4d7,
-      transparent: true,
-      opacity: 0.12,
-      wireframe: true,
-    }),
-  );
-  orbGroup.add(orbShell);
-
-  orbRing = new THREE.Mesh(
-    new THREE.TorusGeometry(1.65, 0.05, 16, 140),
-    new THREE.MeshStandardMaterial({
-      color: 0x31c2b3,
-      emissive: 0x31c2b3,
-      emissiveIntensity: 0.35,
-      roughness: 0.28,
-      metalness: 0.3,
-    }),
-  );
-  orbRing.rotation.x = Math.PI / 2.6;
-  orbGroup.add(orbRing);
-
-  const particleGeometry = new THREE.BufferGeometry();
-  const particleCount = 220;
-  const positions = new Float32Array(particleCount * 3);
-  for (let index = 0; index < particleCount; index += 1) {
-    const radius = 2.4 + Math.random() * 3.8;
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    positions[index * 3] = radius * Math.sin(phi) * Math.cos(theta);
-    positions[index * 3 + 1] = radius * Math.cos(phi) * 0.55;
-    positions[index * 3 + 2] = radius * Math.sin(phi) * Math.sin(theta);
-  }
-  particleGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  starField = new THREE.Points(
-    particleGeometry,
-    new THREE.PointsMaterial({
-      color: 0xffefc6,
-      size: 0.045,
-      transparent: true,
-      opacity: 0.72,
-    }),
-  );
-  scene.add(starField);
-
-  const ground = new THREE.Mesh(
-    new THREE.CircleGeometry(5.2, 80),
-    new THREE.MeshBasicMaterial({
-      color: 0x0a1d20,
-      transparent: true,
-      opacity: 0.45,
-    }),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.set(0, -2.05, 0);
-  scene.add(ground);
-
-  resizeStage();
-}
-
-function resizeStage() {
-  const rect = stageCanvas.getBoundingClientRect();
-  const width = Math.max(rect.width, 1);
-  const height = Math.max(rect.height, 1);
-  camera.aspect = width / height;
-  camera.updateProjectionMatrix();
-  renderer.setSize(width, height, false);
-}
-
-function animateSphere(timeMs) {
-  const idleDrift = Math.sin(timeMs * 0.00055) * 0.04;
-  state.glow = lerp(state.glow, state.glowTarget, 0.08);
-
-  state.sphereCurrent.x = lerp(state.sphereCurrent.x, state.sphereTarget.x, 0.11);
-  state.sphereCurrent.y = lerp(state.sphereCurrent.y, state.sphereTarget.y, 0.11);
-  state.sphereCurrent.scale = lerp(state.sphereCurrent.scale, state.sphereTarget.scale, 0.11);
-  state.sphereCurrent.rotX = lerp(state.sphereCurrent.rotX, state.sphereTarget.rotX, 0.11);
-  state.sphereCurrent.rotY = lerp(state.sphereCurrent.rotY, state.sphereTarget.rotY, 0.11);
-  state.sphereCurrent.rotZ = lerp(state.sphereCurrent.rotZ, state.sphereTarget.rotZ, 0.11);
-
-  orbGroup.position.set(state.sphereCurrent.x, state.sphereCurrent.y + idleDrift, 0);
-  orbGroup.scale.setScalar(state.sphereCurrent.scale);
-  orbGroup.rotation.x = state.sphereCurrent.rotX;
-  orbGroup.rotation.y = state.sphereCurrent.rotY + timeMs * 0.00012;
-  orbGroup.rotation.z = state.sphereCurrent.rotZ;
-
-  orbRing.rotation.z += 0.003 + state.glow * 0.02;
-  orbShell.rotation.y -= 0.0025;
-  starField.rotation.y += 0.0007;
-  starField.rotation.x = Math.sin(timeMs * 0.0001) * 0.12;
-
-  orbCore.material.emissiveIntensity = 0.14 + state.glow * 0.45;
-  orbRing.material.emissiveIntensity = 0.28 + state.glow * 0.75;
-
-  renderer.render(scene, camera);
-}
-
-async function initHandLandmarker() {
-  const visionTasks = await import(MP_TASKS_VISION_MODULE);
-  const { FilesetResolver, HandLandmarker } = visionTasks;
-  const filesetResolver = await FilesetResolver.forVisionTasks(MP_TASKS_WASM_ROOT);
-  state.handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
-    baseOptions: {
-      modelAssetPath: HAND_MODEL_PATH,
-    },
+async function ensureHandLandmarker() {
+  if (state.handLandmarker) return state.handLandmarker;
+  const mod = await loadVisionModule();
+  const fileset = await mod.FilesetResolver.forVisionTasks(MP_WASM_ROOT);
+  state.handLandmarker = await mod.HandLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: HAND_MODEL_PATH },
+    numHands: 1,
     runningMode: "VIDEO",
-    numHands: 2,
-    minHandDetectionConfidence: 0.6,
-    minHandPresenceConfidence: 0.6,
+    minHandDetectionConfidence: 0.55,
+    minHandPresenceConfidence: 0.55,
     minTrackingConfidence: 0.5,
   });
-  state.interactionMode = "idle";
-  state.interactionDetail = "Tracker ready. Start the camera to begin.";
-  updateHud(0);
+  return state.handLandmarker;
+}
+
+function describeCameraError(error) {
+  if (!error) return { title: "无法启动摄像头", body: "未知错误" };
+  const name = error.name || "";
+  const msg = error.message || String(error);
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return {
+        title: "摄像头权限被拒绝",
+        body:
+          "请点击地址栏左侧的相机图标，把权限改回「允许」，然后点重试。" +
+          "（系统层面：检查 GNOME 设置 → 隐私 → 摄像头是否开启。）",
+      };
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return {
+        title: "找不到可用摄像头",
+        body: "请确认有摄像头设备，且未被其他程序占用（如 Zoom/录制软件）。",
+      };
+    case "NotReadableError":
+      return {
+        title: "摄像头被占用",
+        body:
+          "另一个程序或浏览器标签正在使用摄像头。" +
+          "请关掉其他用到摄像头的程序（包括本网页其他标签、record.html）后重试。",
+      };
+    case "AbortError":
+      return {
+        title: "摄像头启动被中断",
+        body: "刚才的启动被打断；点重试再试一次。",
+      };
+    default:
+      return {
+        title: "无法启动摄像头",
+        body: `${name || "Error"}: ${msg}`,
+      };
+  }
 }
 
 async function startCamera() {
-  if (state.runtimeStarted) {
+  if (state.runtimeStarted) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setOverlayMessage({
+      title: "浏览器不支持 getUserMedia",
+      body: "请使用最新的 Chrome / Firefox / Edge，并确认是从 http://127.0.0.1 访问（非 file:// 或外网 IP）。",
+    });
     return;
   }
-
+  setOverlayMessage({ title: "正在启动摄像头", body: "请允许浏览器访问摄像头。" });
+  ui.startButton.disabled = true;
+  let stream = null;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: "user",
-      },
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
       audio: false,
     });
-
     video.srcObject = stream;
     await video.play();
     state.videoReady = true;
-    state.runtimeStarted = true;
-    state.interactionMode = "idle";
-    state.interactionDetail = "Camera ready. Show one open hand to enter ready mode.";
-    setOverlayMessage(
-      "Tracking active",
-      "Open one hand for ready mode. Use one-hand pinch to drag. Use two-hand pinch to scale and rotate.",
-    );
-    ui.startButton.textContent = "Camera Running";
-    ui.startButton.disabled = true;
-    updateHud(0);
-  } catch (error) {
-    state.interactionMode = "error";
-    state.interactionDetail = "Camera access failed. Allow webcam permission and refresh.";
-    setOverlayMessage("Camera permission failed", String(error));
-    updateHud(0);
-  }
-}
-
-function processFrame() {
-  syncOverlaySize();
-
-  if (
-    state.handLandmarker &&
-    state.videoReady &&
-    video.readyState >= 2 &&
-    video.currentTime !== state.lastVideoTime
-  ) {
-    const nowMs = performance.now();
-    const result = state.handLandmarker.detectForVideo(video, nowMs);
-    processHands(result, nowMs);
-    state.lastVideoTime = video.currentTime;
-  }
-
-  requestAnimationFrame(processFrame);
-}
-
-function renderStage(timeMs) {
-  animateSphere(timeMs);
-  requestAnimationFrame(renderStage);
-}
-
-async function bootstrap() {
-  initThree();
-  updateHud(0);
-  setOverlayMessage(
-    "Camera inactive",
-    "Start the demo, allow webcam access, then use one-hand pinch to drag and two-hand pinch to scale and rotate.",
-  );
-
-  ui.startButton.addEventListener("click", startCamera);
-  ui.resetButton.addEventListener("click", () => {
-    resetSphere();
-    state.interactionMode = "ready";
-    state.interactionDetail = "Sphere reset manually.";
-    state.gestureLabel = "manual reset";
-    updateHud(state.videoReady ? 1 : 0);
-  });
-
-  window.addEventListener("resize", () => {
-    resizeStage();
+    setStatusPill(ui.cameraState, "摄像头已启动", "active");
     syncOverlaySize();
-  });
+  } catch (error) {
+    console.error("getUserMedia failed", error);
+    setStatusPill(ui.cameraState, "摄像头错误", "warn");
+    const detail = describeCameraError(error);
+    setOverlayMessage(detail, { showRetry: true });
+    ui.startButton.disabled = false;
+    return;
+  }
 
-  await initHandLandmarker();
-  requestAnimationFrame(processFrame);
-  requestAnimationFrame(renderStage);
+  setOverlayMessage({ title: "加载手部模型…", body: "约 2 秒，请稍候。" });
+  try {
+    await ensureHandLandmarker();
+  } catch (error) {
+    setOverlayMessage(
+      {
+        title: "手部模型加载失败",
+        body: `${error?.name || "Error"}: ${error?.message || error}. 请检查网络（jsdelivr CDN）。`,
+      },
+      { showRetry: true },
+    );
+    ui.startButton.disabled = false;
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    state.videoReady = false;
+    return;
+  }
+
+  // Try to load the trained MLP. Failure is non-fatal — we fall back to rules.
+  try {
+    await loadGestureModel({
+      modelUrl: "models/gesture_mlp.onnx",
+      metaUrl: "models/gesture_mlp.meta.json",
+    });
+  } catch (error) {
+    console.warn("gesture MLP not loaded; using rule-based classifier", error);
+    showBubble("MLP 未就绪，已降级到规则识别", "warn");
+  }
+
+  state.runtimeStarted = true;
+  state.uptimeStartedAt = performance.now();
+  setOverlayMessage(null);
+  ui.startButton.textContent = "运行中";
+  ui.startButton.disabled = true;
+  requestAnimationFrame(loop);
 }
 
-bootstrap().catch((error) => {
-  state.interactionMode = "error";
-  state.interactionDetail = "Initialization failed.";
-  setOverlayMessage("Initialization failed", String(error));
-  updateHud(0);
-  console.error(error);
-});
+function syncOverlaySize() {
+  const rect = video.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  overlayCanvas.width = Math.round(rect.width * dpr);
+  overlayCanvas.height = Math.round(rect.height * dpr);
+  overlayCanvas.style.width = `${rect.width}px`;
+  overlayCanvas.style.height = `${rect.height}px`;
+  overlayContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawSkeleton(landmarks) {
+  const ctx = overlayContext;
+  ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  if (!landmarks) return;
+  const w = overlayCanvas.width / (window.devicePixelRatio || 1);
+  const h = overlayCanvas.height / (window.devicePixelRatio || 1);
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "rgba(61, 215, 194, 0.85)";
+  ctx.beginPath();
+  for (const [a, b] of HAND_CONNECTIONS) {
+    const pa = landmarks[a];
+    const pb = landmarks[b];
+    ctx.moveTo(pa.x * w, pa.y * h);
+    ctx.lineTo(pb.x * w, pb.y * h);
+  }
+  ctx.stroke();
+  for (const lm of landmarks) {
+    ctx.beginPath();
+    ctx.fillStyle = "#ffd66b";
+    ctx.arc(lm.x * w, lm.y * h, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+async function classify(landmarks, handedness) {
+  let result;
+  if (isModelLoaded()) {
+    result = await classifyLandmarks(landmarks, handedness);
+  } else {
+    result = classifyByRule(landmarks);
+  }
+  return rerankPinchVsFistOk(result, landmarks);
+}
+
+// MLP 经常把「握拳」和「OK 圈」识别成「捏合」（拇指食指都靠在一起）。
+// 这里用关键点几何在 pinch 输出上做二次判定：
+//   * 中无小三指都收拢 → 改判为 fist
+//   * 中无小三指都伸展 → 改判为 ok
+//   * 中无小三指部分伸展 → 保留 pinch
+function rerankPinchVsFistOk(result, landmarks) {
+  if (!result || result.label !== "pinch") return result;
+  const wrist = landmarks[0];
+  const middleMcp = landmarks[9];
+  const palmScale = Math.max(
+    Math.hypot(wrist.x - middleMcp.x, wrist.y - middleMcp.y),
+    1e-4,
+  );
+  const isExtended = (tipIdx, pipIdx) => {
+    const tip = landmarks[tipIdx];
+    const pip = landmarks[pipIdx];
+    return tip.y < pip.y - 0.02;
+  };
+  const middleExt = isExtended(12, 10);
+  const ringExt = isExtended(16, 14);
+  const pinkyExt = isExtended(20, 18);
+  const extOther = (middleExt ? 1 : 0) + (ringExt ? 1 : 0) + (pinkyExt ? 1 : 0);
+
+  const tipsAvgToWrist =
+    [8, 12, 16, 20]
+      .map((i) =>
+        Math.hypot(landmarks[i].x - wrist.x, landmarks[i].y - wrist.y) / palmScale,
+      )
+      .reduce((a, b) => a + b, 0) / 4;
+
+  // 全部三指收拢 + 所有 tip 离 wrist 都很近 → 握拳
+  if (extOther === 0 && tipsAvgToWrist < 1.5) {
+    return { ...result, label: "fist", confidence: Math.max(result.confidence, 0.8) };
+  }
+  // 中无小都伸展 → 拇指食指捏圈 + 其他三指张开 = OK
+  if (extOther >= 2) {
+    return { ...result, label: "ok", confidence: Math.max(result.confidence, 0.8) };
+  }
+  // 否则保持 pinch
+  return result;
+}
+
+function deriveAnchor(landmarks) {
+  const indexTip = landmarks[8];
+  const thumbTip = landmarks[4];
+  const x = (indexTip.x + thumbTip.x) * 0.5;
+  const y = (indexTip.y + thumbTip.y) * 0.5;
+  return { x, y };
+}
+
+function updateUiTelemetry(detection) {
+  ui.handsValue.textContent = detection ? "1" : "0";
+  ui.latencyValue.textContent = `${state.latencyMs.toFixed(0)} ms`;
+  ui.fpsValue.textContent = state.fps.toFixed(1);
+  ui.uptimeValue.textContent = `${((performance.now() - state.uptimeStartedAt) / 1000).toFixed(0)} s`;
+}
+
+function updateGestureUi(label, confidence) {
+  if (!label) {
+    ui.gestureLabel.textContent = "等待手势";
+    ui.confidenceBar.style.width = "0%";
+    ui.confidenceValue.textContent = "0%";
+    return;
+  }
+  ui.gestureLabel.textContent = GESTURE_LABELS_CN[label] || label;
+  const pct = Math.round(confidence * 100);
+  ui.confidenceBar.style.width = `${pct}%`;
+  ui.confidenceValue.textContent = `${pct}%`;
+}
+
+function applyControlSnapshot(snapshot) {
+  if (!snapshot) return;
+  state.controlSnapshot = snapshot;
+  let kind = "idle";
+  let text = "未连接";
+  switch (snapshot.state) {
+    case "active":
+      kind = "active";
+      text = "控制已开启";
+      break;
+    case "locked":
+      kind = "warn";
+      text = "已锁定";
+      break;
+    case "paused":
+      kind = "warn";
+      text = "已暂停";
+      break;
+    case "wayland-blocked":
+      kind = "warn";
+      text = "Wayland 会话不支持";
+      break;
+    case "fallback":
+      kind = "warn";
+      text = "pyautogui 不可用";
+      break;
+  }
+  setStatusPill(ui.controlState, text, kind);
+  ui.lastActionValue.textContent = snapshot.last_action || "—";
+  if (snapshot.warning) {
+    setWarning(snapshot.warning);
+  } else {
+    setWarning(null);
+  }
+  if (snapshot.screen_size && snapshot.screen_size[0]) {
+    ui.screenSizeValue.textContent = `${snapshot.screen_size[0]} × ${snapshot.screen_size[1]}`;
+  }
+  if (snapshot.cursor) {
+    ui.cursorValue.textContent = `(${snapshot.cursor[0]}, ${snapshot.cursor[1]})`;
+  }
+}
+
+let lastFrameTimestamp = 0;
+let lastInferenceStart = 0;
+
+async function loop() {
+  if (!state.runtimeStarted) return;
+  syncOverlaySize();
+  const now = performance.now();
+  if (lastFrameTimestamp > 0) {
+    const dt = now - lastFrameTimestamp;
+    state.fps = state.fps * 0.85 + (1000 / Math.max(dt, 1)) * 0.15;
+  }
+  lastFrameTimestamp = now;
+
+  if (video.readyState >= 2 && video.currentTime !== state.lastVideoTime) {
+    state.lastVideoTime = video.currentTime;
+    lastInferenceStart = performance.now();
+    let result;
+    try {
+      result = state.handLandmarker.detectForVideo(video, now);
+    } catch (error) {
+      console.warn("detectForVideo failed", error);
+    }
+    state.latencyMs =
+      state.latencyMs * 0.7 + (performance.now() - lastInferenceStart) * 0.3;
+
+    if (result && result.landmarks && result.landmarks.length > 0) {
+      const landmarks = result.landmarks[0];
+      const handedness =
+        result.handednesses?.[0]?.[0]?.categoryName || "Right";
+      drawSkeleton(landmarks);
+
+      let prediction;
+      try {
+        prediction = await classify(landmarks, handedness);
+      } catch (error) {
+        prediction = classifyByRule(landmarks);
+      }
+
+      const smoothed = smoother.push(prediction.label, prediction.confidence);
+      state.smoothedLabel = smoothed.label;
+      state.smoothedConfidence = smoothed.confidence;
+      updateGestureUi(smoothed.label, smoothed.confidence);
+
+      // dynamic swipe detection runs in parallel with static recognition
+      const wrist = landmarks[0];
+      const swipeLabel = swipe.observe({ x: wrist.x, y: wrist.y }, now);
+      if (swipeLabel) {
+        dispatchEvent(swipeLabel, 0.85, deriveAnchor(landmarks), handedness);
+      }
+
+      if (smoothed.label) {
+        dispatchEvent(
+          smoothed.label,
+          smoothed.confidence,
+          deriveAnchor(landmarks),
+          handedness,
+        );
+      }
+      updateUiTelemetry({});
+    } else {
+      drawSkeleton(null);
+      smoother.reset();
+      swipe.reset();
+      state.smoothedLabel = null;
+      updateGestureUi(null, 0);
+      updateUiTelemetry(null);
+      // tell the backend "no hand" so it releases drag state etc.
+      controlClient.sendGesture({
+        label: "open_palm",
+        confidence: 0.0,
+        anchor: null,
+        handedness: "Right",
+        action: "release",
+      });
+    }
+  }
+
+  requestAnimationFrame(loop);
+}
+
+function dispatchEvent(label, confidence, anchor, handedness) {
+  const binding = state.bindings[label];
+  if (!binding || !binding.enabled) return;
+  if (state.testMode) {
+    const cn = GESTURE_LABELS_CN[label] || label;
+    showBubble(`[测试] ${cn} → ${actionLabel(binding.action)}`, "info");
+    state.triggerCount += 1;
+    ui.triggerCountValue.textContent = String(state.triggerCount);
+    return;
+  }
+  const sent = controlClient.sendGesture({
+    label,
+    confidence,
+    anchor,
+    handedness,
+    action: binding.action,
+  });
+  if (sent) {
+    state.triggerCount += 1;
+    ui.triggerCountValue.textContent = String(state.triggerCount);
+  }
+}
+
+function actionLabel(action) {
+  return state.actions.find((a) => a.name === action)?.label || action;
+}
+
+function renderBindingsPanel() {
+  const list = ui.bindingsList;
+  list.innerHTML = "";
+  for (const label of [...STATIC_LABELS, ...DYNAMIC_LABELS]) {
+    const binding = state.bindings[label] || { action: "noop", enabled: false };
+    const row = document.createElement("div");
+    row.className = "binding-row";
+
+    const nameBlock = document.createElement("div");
+    nameBlock.className = "binding-name";
+    const cn = document.createElement("p");
+    cn.className = "binding-cn";
+    cn.textContent = GESTURE_LABELS_CN[label] || label;
+    const hint = document.createElement("p");
+    hint.className = "binding-code";
+    hint.textContent = GESTURE_HINTS_CN[label] || label;
+    nameBlock.title = `${GESTURE_LABELS_CN[label] || label}\n${GESTURE_HINTS_CN[label] || ""}`;
+    nameBlock.appendChild(cn);
+    nameBlock.appendChild(hint);
+
+    const select = document.createElement("select");
+    select.className = "binding-select";
+    for (const action of state.actions) {
+      const opt = document.createElement("option");
+      opt.value = action.name;
+      opt.textContent = action.label;
+      if (action.name === binding.action) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.addEventListener("change", () => {
+      state.bindings[label] = { ...binding, action: select.value };
+      pushBindings();
+    });
+
+    const toggle = document.createElement("label");
+    toggle.className = "binding-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !!binding.enabled;
+    checkbox.addEventListener("change", () => {
+      state.bindings[label] = { ...binding, enabled: checkbox.checked };
+      pushBindings();
+    });
+    const toggleText = document.createElement("span");
+    toggleText.textContent = "启用";
+    toggle.appendChild(checkbox);
+    toggle.appendChild(toggleText);
+
+    row.appendChild(nameBlock);
+    row.appendChild(select);
+    row.appendChild(toggle);
+    list.appendChild(row);
+  }
+}
+
+async function pushBindings() {
+  try {
+    const payload = {};
+    for (const [label, spec] of Object.entries(state.bindings)) {
+      payload[label] = { action: spec.action, enabled: !!spec.enabled };
+    }
+    await fetch("/api/bindings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bindings: payload }),
+    });
+  } catch (error) {
+    console.warn("failed to push bindings", error);
+  }
+}
+
+async function loadInitialState() {
+  try {
+    const [statusResp, actionsResp] = await Promise.all([
+      fetch("/api/status").then((r) => r.json()),
+      fetch("/api/actions").then((r) => r.json()),
+    ]);
+    state.bindings = statusResp.bindings || {};
+    state.actions = actionsResp.actions || [];
+    applyControlSnapshot({
+      state: statusResp.state,
+      last_action: statusResp.last_action,
+      warning: statusResp.warning,
+      screen_size: statusResp.screen_size,
+      cursor: statusResp.cursor,
+    });
+    renderBindingsPanel();
+  } catch (error) {
+    setStatusPill(ui.controlState, "后端不可达", "warn");
+    setWarning("无法连接 Python 后端。请确认运行了 ./run_gesture_control.sh。");
+  }
+}
+
+function bindControlClientEvents() {
+  controlClient.addEventListener("connect", () => {
+    setStatusPill(ui.wsState, "后端已连接", "active");
+  });
+  controlClient.addEventListener("disconnect", () => {
+    setStatusPill(ui.wsState, "后端断开，重连中", "warn");
+  });
+  controlClient.addEventListener("error", () => {
+    setStatusPill(ui.wsState, "WS 出错", "warn");
+  });
+  controlClient.addEventListener("message", (event) => {
+    const data = event.detail;
+    if (!data) return;
+    if (data.type === "ack") {
+      if (data.ok && data.action !== "noop" && data.action !== "move_cursor") {
+        showBubble(data.message || data.action, "ok");
+      } else if (!data.ok && data.message) {
+        // only show explicit failure messages (skip noop spam)
+        if (!/未绑定|noop/.test(data.message)) {
+          showBubble(data.message, "warn");
+        }
+      }
+      applyControlSnapshot({
+        state: data.control_state,
+        last_action: data.message,
+        warning: data.warning,
+        cursor: data.cursor,
+        screen_size: state.controlSnapshot?.screen_size,
+      });
+    } else if (data.type === "control_state") {
+      applyControlSnapshot({
+        state: data.state,
+        last_action: data.last_action,
+        warning: data.warning,
+        screen_size: state.controlSnapshot?.screen_size,
+      });
+    }
+  });
+}
+
+function bindUi() {
+  ui.startButton.addEventListener("click", startCamera);
+  if (ui.overlayRetry) {
+    ui.overlayRetry.addEventListener("click", () => {
+      if (state.runtimeStarted) return;
+      startCamera();
+    });
+  }
+  ui.unlockButton.addEventListener("click", () => {
+    fetch("/api/control/unlock", { method: "POST" })
+      .then((r) => r.json())
+      .then((data) => {
+        applyControlSnapshot({
+          state: data.state,
+          last_action: data.last_action,
+          screen_size: state.controlSnapshot?.screen_size,
+        });
+        showBubble(data.last_action || "已解锁", "ok");
+      })
+      .catch(() => showBubble("解锁请求失败", "warn"));
+  });
+  ui.pauseButton.addEventListener("click", () => {
+    fetch("/api/control/toggle_pause", { method: "POST" })
+      .then((r) => r.json())
+      .then((data) => {
+        applyControlSnapshot({
+          state: data.state,
+          last_action: data.last_action,
+          screen_size: state.controlSnapshot?.screen_size,
+        });
+        showBubble(data.last_action || "切换暂停", "info");
+      })
+      .catch(() => showBubble("暂停请求失败", "warn"));
+  });
+  ui.testMode.addEventListener("change", () => {
+    state.testMode = ui.testMode.checked;
+    showBubble(state.testMode ? "测试模式：动作不会真实发送" : "测试模式关闭", "info");
+  });
+}
+
+(async function main() {
+  bindUi();
+  bindControlClientEvents();
+  controlClient.connect();
+  await loadInitialState();
+  state.uptimeStartedAt = performance.now();
+})();

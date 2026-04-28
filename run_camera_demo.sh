@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-exec ./run_showcase_demo.sh "$@"
+exec ./run_web_control_demo.sh "$@"

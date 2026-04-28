@@ -21,7 +21,7 @@ trap cleanup EXIT INT TERM
 sleep 1
 xdg-open "${URL}" >/dev/null 2>&1 || true
 
-echo "Serving gesture_control_demo at ${URL}"
-echo "Press Ctrl-C to stop the local server."
+echo "已启动中文 Web 展示端：${URL}"
+echo "按 Ctrl-C 可停止本地服务。"
 
 wait "${SERVER_PID}"
