@@ -34,10 +34,19 @@ async function loadOrt() {
 export async function loadGestureModel({
   modelUrl = MODEL_URL,
   metaUrl = META_URL,
+  force = false,
 } = {}) {
-  if (_loaded) return { labels: _labels, ort: _ort };
+  if (_loaded && !force) return { labels: _labels, ort: _ort };
   try {
     const ort = await loadOrt();
+    if (_session) {
+      try {
+        await _session.release?.();
+      } catch {
+        // ignore — old runtime versions don't expose release()
+      }
+      _session = null;
+    }
     const meta = await fetch(metaUrl, { cache: "no-cache" }).then((r) => r.json());
     _labels = meta.labels;
     _session = await ort.InferenceSession.create(modelUrl, {

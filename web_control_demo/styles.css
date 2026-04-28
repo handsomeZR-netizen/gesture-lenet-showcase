@@ -196,7 +196,8 @@ textarea {
   background: rgba(255, 255, 255, 0.06);
 }
 
-.test-toggle {
+.test-toggle,
+.model-picker {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -210,6 +211,29 @@ textarea {
 
 .test-toggle input {
   accent-color: var(--teal);
+}
+
+.model-picker-label {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+.model-select {
+  background: rgba(8, 17, 23, 0.85);
+  color: var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.model-select:focus {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
 }
 
 /* -------------------------------------------------------- warning strip */

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,77 @@ LOG = logging.getLogger("gesture_control.server")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = PROJECT_ROOT / "web_control_demo"
 DATA_ROOT = PROJECT_ROOT / "data" / "gesture_keypoints"
+MODELS_ROOT = WEB_ROOT / "models"
+ACTIVE_MODEL_FILE = (
+    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    / "gesture_control"
+    / "active_model.json"
+)
+
+
+def list_available_models() -> list[dict[str, str]]:
+    """Discover all gesture MLP models that the browser can load.
+
+    Layouts supported:
+      models/gesture_mlp.onnx                    → name "default"
+      models/<name>/gesture_mlp.onnx             → name = subdir
+    """
+    found: list[dict[str, str]] = []
+    flat_onnx = MODELS_ROOT / "gesture_mlp.onnx"
+    if flat_onnx.exists():
+        meta_path = MODELS_ROOT / "gesture_mlp.meta.json"
+        display = "default"
+        try:
+            display = json.loads(meta_path.read_text())["display_name"]
+        except Exception:
+            pass
+        found.append(
+            {
+                "name": "default",
+                "display_name": display,
+                "model_url": "models/gesture_mlp.onnx",
+                "meta_url": "models/gesture_mlp.meta.json",
+            }
+        )
+    if MODELS_ROOT.exists():
+        for sub in sorted(MODELS_ROOT.iterdir()):
+            if not sub.is_dir():
+                continue
+            onnx_path = sub / "gesture_mlp.onnx"
+            if not onnx_path.exists():
+                continue
+            meta_path = sub / "gesture_mlp.meta.json"
+            display = sub.name
+            try:
+                display = json.loads(meta_path.read_text())["display_name"]
+            except Exception:
+                pass
+            found.append(
+                {
+                    "name": sub.name,
+                    "display_name": display,
+                    "model_url": f"models/{sub.name}/gesture_mlp.onnx",
+                    "meta_url": f"models/{sub.name}/gesture_mlp.meta.json",
+                }
+            )
+    return found
+
+
+def load_active_model_name() -> str:
+    if ACTIVE_MODEL_FILE.exists():
+        try:
+            return json.loads(ACTIVE_MODEL_FILE.read_text(encoding="utf-8"))["name"]
+        except Exception:
+            pass
+    available = list_available_models()
+    return available[0]["name"] if available else "default"
+
+
+def save_active_model_name(name: str) -> None:
+    ACTIVE_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVE_MODEL_FILE.write_text(
+        json.dumps({"name": name}, ensure_ascii=False), encoding="utf-8"
+    )
 
 ALLOWED_DATASET_LABELS = {
     "open_palm",
@@ -139,6 +211,26 @@ def create_app(*, sensitivity: float = 1.2, safe_start: bool = True) -> FastAPI:
     def api_control_toggle() -> JSONResponse:
         snap = controller.toggle_pause()
         return JSONResponse({"state": snap.state, "last_action": snap.last_action})
+
+    @app.get("/api/models")
+    def api_models() -> JSONResponse:
+        return JSONResponse(
+            {
+                "models": list_available_models(),
+                "active": load_active_model_name(),
+            }
+        )
+
+    class ActiveModelPayload(BaseModel):
+        name: str
+
+    @app.put("/api/models/active")
+    def api_models_set_active(payload: ActiveModelPayload) -> JSONResponse:
+        names = {m["name"] for m in list_available_models()}
+        if payload.name not in names:
+            raise HTTPException(status_code=400, detail=f"unknown model {payload.name}")
+        save_active_model_name(payload.name)
+        return JSONResponse({"active": payload.name})
 
     @app.post("/api/dataset/{label}")
     def api_dataset_post(label: str, payload: DatasetPayload) -> JSONResponse:

@@ -1,0 +1,20 @@
+{
+  "name": "demo_seed",
+  "display_name": "示例：合成数据",
+  "labels": [
+    "open_palm",
+    "point",
+    "pinch",
+    "fist",
+    "victory",
+    "ok",
+    "thumbs_up",
+    "thumbs_down",
+    "three",
+    "call"
+  ],
+  "feature_dim": 63,
+  "input_name": "features",
+  "output_name": "logits",
+  "checkpoint": "outputs/gesture_mlp/demo_seed/best.pth"
+}

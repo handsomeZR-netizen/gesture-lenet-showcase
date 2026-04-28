@@ -25,8 +25,17 @@ from gesture_mlp.model import GestureMLP, parameter_count
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--name",
+        default="default",
+        help="模型名称，会作为 outputs/gesture_mlp/<name>/ 子目录使用，便于训练/对比多个模型",
+    )
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR))
-    parser.add_argument("--output-dir", default="outputs/gesture_mlp")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="覆盖输出目录；不指定时为 outputs/gesture_mlp/<name>/",
+    )
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -100,8 +109,9 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = nn.CrossEntropyLoss()
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else Path("outputs/gesture_mlp") / args.name
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"writing model to {output_dir}")
     best_acc = 0.0
     best_path = output_dir / "best.pth"
     history = []
@@ -156,12 +166,14 @@ def main() -> None:
 
     elapsed = time.time() - started
     summary = {
+        "name": args.name,
         "best_val_acc": best_acc,
         "epochs": args.epochs,
         "train_size": len(train_samples),
         "val_size": len(val_samples),
         "elapsed_seconds": elapsed,
         "labels": GESTURE_LABELS,
+        "data_dir": str(args.data_dir),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")

@@ -103,6 +103,7 @@ const ui = {
   cursorValue: document.getElementById("cursorValue"),
   triggerCountValue: document.getElementById("triggerCountValue"),
   bindingsList: document.getElementById("bindingsList"),
+  modelSelect: document.getElementById("modelSelect"),
 };
 
 const video = document.getElementById("cameraFeed");
@@ -125,6 +126,8 @@ const state = {
   testMode: false,
   pendingActionLabel: null,
   controlSnapshot: null,
+  models: [],
+  activeModelName: null,
 };
 
 const smoother = new LabelSmoother();
@@ -288,16 +291,7 @@ async function startCamera() {
     return;
   }
 
-  // Try to load the trained MLP. Failure is non-fatal — we fall back to rules.
-  try {
-    await loadGestureModel({
-      modelUrl: "models/gesture_mlp.onnx",
-      metaUrl: "models/gesture_mlp.meta.json",
-    });
-  } catch (error) {
-    console.warn("gesture MLP not loaded; using rule-based classifier", error);
-    showBubble("MLP 未就绪，已降级到规则识别", "warn");
-  }
+  await loadActiveGestureModel({ initial: true });
 
   state.runtimeStarted = true;
   state.uptimeStartedAt = performance.now();
@@ -349,7 +343,40 @@ async function classify(landmarks, handedness) {
   } else {
     result = classifyByRule(landmarks);
   }
-  return rerankPinchVsFistOk(result, landmarks);
+  result = rerankPinchVsFistOk(result, landmarks);
+  result = rerankFistVsThumbs(result, landmarks);
+  return result;
+}
+
+// MLP 经常把「拇指向上 / 拇指向下」识别成「握拳」（四指都收拢，外形相近）。
+// 这里在 fist 输出上做二次判定：如果拇指 tip 明显高于其他四指 → thumbs_up，
+// 明显低于其他四指 → thumbs_down，否则保留 fist。
+function rerankFistVsThumbs(result, landmarks) {
+  if (!result || result.label !== "fist") return result;
+  const wrist = landmarks[0];
+  const middleMcp = landmarks[9];
+  const palmScale = Math.max(
+    Math.hypot(wrist.x - middleMcp.x, wrist.y - middleMcp.y),
+    1e-4,
+  );
+  const thumbTip = landmarks[4];
+  const otherTips = [landmarks[8], landmarks[12], landmarks[16], landmarks[20]];
+  const minOtherY = Math.min(...otherTips.map((p) => p.y));
+  const maxOtherY = Math.max(...otherTips.map((p) => p.y));
+  // 拇指相对其他指尖的纵向偏移，按手掌尺度归一化
+  const upGap = (minOtherY - thumbTip.y) / palmScale;
+  const downGap = (thumbTip.y - maxOtherY) / palmScale;
+  // 拇指还得离掌心有距离（不是收在拳心里），避免把真正的握拳误判
+  const thumbExtension =
+    Math.hypot(thumbTip.x - wrist.x, thumbTip.y - wrist.y) / palmScale;
+
+  if (upGap > 0.35 && thumbExtension > 1.05) {
+    return { ...result, label: "thumbs_up", confidence: Math.max(result.confidence, 0.78) };
+  }
+  if (downGap > 0.35 && thumbExtension > 1.05) {
+    return { ...result, label: "thumbs_down", confidence: Math.max(result.confidence, 0.78) };
+  }
+  return result;
 }
 
 // MLP 经常把「握拳」和「OK 圈」识别成「捏合」（拇指食指都靠在一起）。
@@ -642,6 +669,80 @@ async function pushBindings() {
   }
 }
 
+async function loadAvailableModels() {
+  try {
+    const data = await fetch("/api/models").then((r) => r.json());
+    state.models = data.models || [];
+    state.activeModelName = data.active || (state.models[0]?.name ?? null);
+    renderModelSelect();
+  } catch (error) {
+    console.warn("failed to load models", error);
+  }
+}
+
+function renderModelSelect() {
+  const sel = ui.modelSelect;
+  if (!sel) return;
+  sel.innerHTML = "";
+  if (state.models.length === 0) {
+    const opt = document.createElement("option");
+    opt.textContent = "（无可用模型）";
+    opt.disabled = true;
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  for (const m of state.models) {
+    const opt = document.createElement("option");
+    opt.value = m.name;
+    opt.textContent = `${m.display_name || m.name}${m.name === state.activeModelName ? " ✓" : ""}`;
+    if (m.name === state.activeModelName) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+async function loadActiveGestureModel({ initial = false } = {}) {
+  if (!state.models.length) return;
+  const name = state.activeModelName || state.models[0].name;
+  const found = state.models.find((m) => m.name === name) || state.models[0];
+  try {
+    await loadGestureModel({
+      modelUrl: found.model_url,
+      metaUrl: found.meta_url,
+      force: !initial,
+    });
+    if (!initial) {
+      showBubble(`已切换到模型 ${found.display_name || found.name}`, "ok");
+    }
+  } catch (error) {
+    console.warn("gesture MLP not loaded; using rule-based classifier", error);
+    showBubble("MLP 未就绪，已降级到规则识别", "warn");
+  }
+}
+
+async function setActiveModel(name) {
+  if (!name || name === state.activeModelName) return;
+  try {
+    const res = await fetch("/api/models/active", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      showBubble(`切换失败：${text}`, "warn");
+      return;
+    }
+    state.activeModelName = name;
+    renderModelSelect();
+    await loadActiveGestureModel();
+  } catch (error) {
+    console.warn("set active model failed", error);
+    showBubble("切换失败", "warn");
+  }
+}
+
 async function loadInitialState() {
   try {
     const [statusResp, actionsResp] = await Promise.all([
@@ -742,12 +843,17 @@ function bindUi() {
     state.testMode = ui.testMode.checked;
     showBubble(state.testMode ? "测试模式：动作不会真实发送" : "测试模式关闭", "info");
   });
+  if (ui.modelSelect) {
+    ui.modelSelect.addEventListener("change", (event) => {
+      setActiveModel(event.target.value);
+    });
+  }
 }
 
 (async function main() {
   bindUi();
   bindControlClientEvents();
   controlClient.connect();
-  await loadInitialState();
+  await Promise.all([loadInitialState(), loadAvailableModels()]);
   state.uptimeStartedAt = performance.now();
 })();
