@@ -17,6 +17,7 @@ from typing import Any
 import cv2
 import mediapipe as mp
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from gesture_lenet.utils import (
     detect_system_camera_nodes,
@@ -38,6 +39,12 @@ HAND_CONNECTIONS = [
     (9, 13), (13, 14), (14, 15), (15, 16),
     (13, 17), (0, 17), (17, 18), (18, 19), (19, 20),
 ]
+FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+]
+FONT_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
 
 @dataclass(frozen=True)
@@ -376,7 +383,7 @@ class MouseKeyboardController:
             if now - self.last_hotkey_at > 1.25:
                 if self._hotkey("alt", "tab"):
                     self.last_hotkey_at = now
-                    self.last_action = "Alt+Tab"
+                    self.last_action = "已切换窗口（Alt+Tab）"
             else:
                 self.last_action = "窗口切换冷却中"
         elif label == "Fist":
@@ -639,8 +646,30 @@ def draw_text(
     color: tuple[int, int, int] = (235, 238, 242),
     thickness: int = 1,
 ) -> None:
-    cv2.putText(frame, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, (10, 12, 16), thickness + 2)
-    cv2.putText(frame, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
+    font_size = max(14, int(round(32 * scale)))
+    font = FONT_CACHE.get(font_size)
+    if font is None:
+        for candidate in FONT_CANDIDATES:
+            if Path(candidate).exists():
+                font = ImageFont.truetype(candidate, font_size)
+                break
+        if font is None:
+            font = ImageFont.load_default()
+        FONT_CACHE[font_size] = font
+
+    pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_image)
+    x, baseline_y = origin
+    top_y = baseline_y - int(font_size * 0.82)
+    draw.text(
+        (x, top_y),
+        text,
+        font=font,
+        fill=(color[2], color[1], color[0]),
+        stroke_width=max(1, thickness),
+        stroke_fill=(16, 12, 10),
+    )
+    frame[:] = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
 
 def draw_card(
