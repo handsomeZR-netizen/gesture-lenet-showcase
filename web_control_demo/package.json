@@ -1,0 +1,10 @@
+{
+  "name": "gesture-control-web",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Browser front-end for gesture-driven computer control.",
+  "scripts": {
+    "test": "node ../tests/test_features_js.mjs"
+  }
+}

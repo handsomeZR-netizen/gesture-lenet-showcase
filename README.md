@@ -3,6 +3,10 @@
 > 用浏览器看你的手 ✋ → 神经网络认手势 🧠 → Python 后端按下键鼠 🖱️⌨️ — 把鼠标、滚轮、媒体键、窗口管理一起交给 10 个手势打理。
 
 <p align="center">
+  <a href="https://github.com/handsomeZR-netizen/gesture-lenet-showcase/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/handsomeZR-netizen/gesture-lenet-showcase/actions/workflows/ci.yml/badge.svg">
+  </a>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-20%20passing-success?logo=pytest&logoColor=white">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white">
   <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white">
   <img alt="ONNX" src="https://img.shields.io/badge/ONNX-Runtime-005CED?logo=onnx&logoColor=white">
@@ -12,6 +16,7 @@
   <br/>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black">
   <img alt="Browser" src="https://img.shields.io/badge/Browser-Chrome%20%7C%20Firefox-4285F4?logo=googlechrome&logoColor=white">
+  <img alt="Vercel" src="https://img.shields.io/badge/deploy-Vercel-000000?logo=vercel&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-active-success.svg">
   <img alt="Course" src="https://img.shields.io/badge/CV%20Course-Project-9C27B0">
@@ -298,6 +303,34 @@ curl -s http://127.0.0.1:8765/api/bindings | jq
 - [ ] 多手协同（双手缩放 / 旋转）
 - [ ] 语音 + 手势多模态融合
 - [ ] PWA 离线包
+
+---
+
+## 🧪 测试
+
+```bash
+# Python 单元测试（20 用例 < 3 秒）
+pytest tests/ -v
+
+# JS 跨语言一致性测试
+node tests/test_features_js.mjs
+```
+
+CI 在每次 push 自动跑这两套（详见 `.github/workflows/ci.yml`）。
+
+---
+
+## 🚀 部署
+
+| 场景 | 推荐方案 |
+|---|---|
+| 课堂演示 / 给同学玩 | **Vercel 静态站**（自动进入演示模式） |
+| 真实控制本机 | 本地跑 `./run_gesture_control.sh` |
+| 跨机器局域网 | 本地后端 `HOST=0.0.0.0` + ssh 端口转发 |
+
+详见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+> ⚠️ 后端 evdev 后端必须在被控机器本机运行，**不可上 Railway / Cloud Run** —— 容器没有用户的鼠标键盘可以控制。
 
 ---
 

@@ -128,6 +128,8 @@ const state = {
   controlSnapshot: null,
   models: [],
   activeModelName: null,
+  demoMode: false,
+  wsAttempts: 0,
 };
 
 const smoother = new LabelSmoother();
@@ -574,9 +576,10 @@ async function loop() {
 function dispatchEvent(label, confidence, anchor, handedness) {
   const binding = state.bindings[label];
   if (!binding || !binding.enabled) return;
-  if (state.testMode) {
+  if (state.testMode || state.demoMode) {
     const cn = GESTURE_LABELS_CN[label] || label;
-    showBubble(`[测试] ${cn} → ${actionLabel(binding.action)}`, "info");
+    const tag = state.demoMode ? "[演示]" : "[测试]";
+    showBubble(`${tag} ${cn} → ${actionLabel(binding.action)}`, "info");
     state.triggerCount += 1;
     ui.triggerCountValue.textContent = String(state.triggerCount);
     return;
@@ -676,8 +679,34 @@ async function loadAvailableModels() {
     state.activeModelName = data.active || (state.models[0]?.name ?? null);
     renderModelSelect();
   } catch (error) {
-    console.warn("failed to load models", error);
+    // Vercel/static-only deployment: list known models by probing meta files.
+    state.models = await probeStaticModels();
+    state.activeModelName = state.models[0]?.name || null;
+    renderModelSelect();
   }
+}
+
+async function probeStaticModels() {
+  // Try the flat default first; subdirectories cannot be enumerated without a
+  // backend, so static deployments will only see the default model.
+  const candidates = [
+    {
+      name: "default",
+      display_name: "default",
+      model_url: "models/gesture_mlp.onnx",
+      meta_url: "models/gesture_mlp.meta.json",
+    },
+  ];
+  const found = [];
+  for (const c of candidates) {
+    try {
+      const r = await fetch(c.meta_url, { method: "HEAD" });
+      if (r.ok) found.push(c);
+    } catch {
+      // ignore
+    }
+  }
+  return found;
 }
 
 function renderModelSelect() {
@@ -743,6 +772,76 @@ async function setActiveModel(name) {
   }
 }
 
+function enterDemoMode() {
+  state.demoMode = true;
+  state.testMode = true;
+  if (ui.testMode) {
+    ui.testMode.checked = true;
+    ui.testMode.disabled = true;
+  }
+  setStatusPill(ui.wsState, "演示模式（无后端）", "warn");
+  setStatusPill(ui.controlState, "演示模式", "warn");
+  setWarning(
+    "未检测到本地 Python 后端 — 已自动进入演示模式：识别和 UI 全部正常，但不会真的注入键鼠。" +
+    "若要真实控制电脑，请按 README 在本机运行 ./run_gesture_control.sh。",
+  );
+  showBubble("演示模式：动作仅显示，不真实发送", "warn");
+  if (state.actions.length === 0) {
+    state.actions = buildDemoActions();
+  }
+  if (Object.keys(state.bindings).length === 0) {
+    state.bindings = buildDemoBindings();
+  }
+  if (state.models.length === 0) {
+    state.models = [
+      {
+        name: "default",
+        display_name: "default",
+        model_url: "models/gesture_mlp.onnx",
+        meta_url: "models/gesture_mlp.meta.json",
+      },
+    ];
+    state.activeModelName = "default";
+    renderModelSelect();
+  }
+  renderBindingsPanel();
+}
+
+function buildDemoActions() {
+  return [
+    { name: "release", label: "释放（无动作）" },
+    { name: "move_cursor", label: "移动鼠标" },
+    { name: "click_or_drag", label: "单击 / 长捏拖拽" },
+    { name: "press_escape", label: "Esc / 取消" },
+    { name: "alt_tab", label: "切换窗口（Alt+Tab）" },
+    { name: "media_playpause", label: "播放 / 暂停" },
+    { name: "volume_up", label: "音量 +" },
+    { name: "volume_down", label: "音量 -" },
+    { name: "show_desktop", label: "显示桌面" },
+    { name: "media_next", label: "下一首" },
+    { name: "scroll_up", label: "向上滚动" },
+    { name: "scroll_down", label: "向下滚动" },
+    { name: "noop", label: "禁用" },
+  ];
+}
+
+function buildDemoBindings() {
+  return {
+    open_palm: { action: "release", enabled: true },
+    point: { action: "move_cursor", enabled: true },
+    pinch: { action: "click_or_drag", enabled: true },
+    fist: { action: "press_escape", enabled: true },
+    victory: { action: "alt_tab", enabled: true },
+    ok: { action: "media_playpause", enabled: true },
+    thumbs_up: { action: "volume_up", enabled: true },
+    thumbs_down: { action: "volume_down", enabled: true },
+    three: { action: "show_desktop", enabled: true },
+    call: { action: "media_next", enabled: true },
+    swipe_up: { action: "scroll_up", enabled: true },
+    swipe_down: { action: "scroll_down", enabled: true },
+  };
+}
+
 async function loadInitialState() {
   try {
     const [statusResp, actionsResp] = await Promise.all([
@@ -760,17 +859,26 @@ async function loadInitialState() {
     });
     renderBindingsPanel();
   } catch (error) {
-    setStatusPill(ui.controlState, "后端不可达", "warn");
-    setWarning("无法连接 Python 后端。请确认运行了 ./run_gesture_control.sh。");
+    enterDemoMode();
   }
 }
 
 function bindControlClientEvents() {
   controlClient.addEventListener("connect", () => {
+    state.demoMode = false;
+    state.wsAttempts = 0;
     setStatusPill(ui.wsState, "后端已连接", "active");
+    if (ui.testMode) {
+      ui.testMode.disabled = false;
+    }
   });
   controlClient.addEventListener("disconnect", () => {
-    setStatusPill(ui.wsState, "后端断开，重连中", "warn");
+    state.wsAttempts += 1;
+    if (state.wsAttempts >= 2 && !state.demoMode) {
+      enterDemoMode();
+    } else {
+      setStatusPill(ui.wsState, "后端断开，重连中", "warn");
+    }
   });
   controlClient.addEventListener("error", () => {
     setStatusPill(ui.wsState, "WS 出错", "warn");
