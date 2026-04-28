@@ -389,6 +389,41 @@ async function classify(landmarks, handedness) {
   }
   result = rerankPinchVsFistOk(result, landmarks);
   result = rerankFistVsThumbs(result, landmarks);
+  result = rerankPinchVsFist(result, landmarks);
+  return result;
+}
+
+// 双向校验 pinch ↔ fist：用食指相对掌心的伸展程度区分。
+// 真正的 pinch：食指还在伸（捏拇指时食指其实是伸出去的），indexExtension 大；
+// 真正的 fist：食指收进掌心，indexExtension 小。
+function rerankPinchVsFist(result, landmarks) {
+  if (!result) return result;
+  if (result.label !== "pinch" && result.label !== "fist") return result;
+  const wrist = landmarks[0];
+  const middleMcp = landmarks[9];
+  const palmScale = Math.max(
+    Math.hypot(wrist.x - middleMcp.x, wrist.y - middleMcp.y),
+    1e-4,
+  );
+  const indexTip = landmarks[8];
+  const thumbTip = landmarks[4];
+  const indexExtension =
+    Math.hypot(indexTip.x - wrist.x, indexTip.y - wrist.y) / palmScale;
+  const pinchDist =
+    Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y) / palmScale;
+
+  if (result.label === "pinch") {
+    // 食指收得太近 wrist → 实际是握拳/类拳
+    if (indexExtension < 1.1) {
+      return { ...result, label: "fist", confidence: 0.72 };
+    }
+  } else {
+    // result.label === "fist"
+    // 食指明显伸展 + 拇指食指距离很近 → 实际是捏合
+    if (indexExtension > 1.4 && pinchDist < 0.45) {
+      return { ...result, label: "pinch", confidence: 0.72 };
+    }
+  }
   return result;
 }
 
@@ -465,12 +500,32 @@ function rerankPinchVsFistOk(result, landmarks) {
   return result;
 }
 
-function deriveAnchor(landmarks) {
+// 平滑后的 anchor，避免摄像头噪声让指针抖
+const _anchorSmoother = { x: null, y: null, prevLabel: null };
+
+function deriveAnchor(landmarks, label) {
   const indexTip = landmarks[8];
   const thumbTip = landmarks[4];
-  const x = (indexTip.x + thumbTip.x) * 0.5;
-  const y = (indexTip.y + thumbTip.y) * 0.5;
-  return { x, y };
+  let rawX, rawY;
+  if (label === "pinch") {
+    // 拇指食指中点
+    rawX = (indexTip.x + thumbTip.x) * 0.5;
+    rawY = (indexTip.y + thumbTip.y) * 0.5;
+  } else {
+    // 默认锁定食指尖
+    rawX = indexTip.x;
+    rawY = indexTip.y;
+  }
+  // 一阶低通：旧值 65% + 新值 35%；切换手势时复位避免跳跃
+  if (_anchorSmoother.prevLabel !== label || _anchorSmoother.x === null) {
+    _anchorSmoother.x = rawX;
+    _anchorSmoother.y = rawY;
+  } else {
+    _anchorSmoother.x = _anchorSmoother.x * 0.65 + rawX * 0.35;
+    _anchorSmoother.y = _anchorSmoother.y * 0.65 + rawY * 0.35;
+  }
+  _anchorSmoother.prevLabel = label;
+  return { x: _anchorSmoother.x, y: _anchorSmoother.y };
 }
 
 function updateUiTelemetry(detection) {
@@ -582,14 +637,14 @@ async function loop() {
       const wrist = landmarks[0];
       const swipeLabel = swipe.observe({ x: wrist.x, y: wrist.y }, now);
       if (swipeLabel) {
-        dispatchEvent(swipeLabel, 0.85, deriveAnchor(landmarks), handedness);
+        dispatchEvent(swipeLabel, 0.85, deriveAnchor(landmarks, swipeLabel), handedness);
       }
 
       if (smoothed.label) {
         dispatchEvent(
           smoothed.label,
           smoothed.confidence,
-          deriveAnchor(landmarks),
+          deriveAnchor(landmarks, smoothed.label),
           handedness,
         );
       }
@@ -615,9 +670,101 @@ async function loop() {
   requestAnimationFrame(loop);
 }
 
+// 需要长按确认 1 秒才触发的动作（防误触）
+const HOLD_CONFIRM_ACTIONS = new Set([
+  "show_desktop",
+  "close_window",
+  "alt_tab",
+  "press_escape",
+]);
+const HOLD_CONFIRM_MS = 1000;
+
+const holdState = {
+  label: null,
+  action: null,
+  startedAt: 0,
+  fired: false,
+};
+
+function holdProgressRatio() {
+  if (!holdState.label) return 0;
+  const elapsed = performance.now() - holdState.startedAt;
+  return Math.max(0, Math.min(1, elapsed / HOLD_CONFIRM_MS));
+}
+
+function resetHold() {
+  if (holdState.label) {
+    setHoldOverlay(null, 0);
+  }
+  holdState.label = null;
+  holdState.action = null;
+  holdState.startedAt = 0;
+  holdState.fired = false;
+}
+
+function setHoldOverlay(text, ratio) {
+  let el = document.getElementById("holdOverlay");
+  if (!text) {
+    if (el) el.style.opacity = "0";
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "holdOverlay";
+    el.className = "hold-overlay";
+    el.innerHTML = `
+      <svg class="hold-ring" viewBox="0 0 80 80" width="80" height="80">
+        <circle cx="40" cy="40" r="34" stroke="rgba(255,255,255,0.12)" stroke-width="6" fill="none"/>
+        <circle id="holdRingFill" cx="40" cy="40" r="34" stroke="#3dd7c2" stroke-width="6"
+                fill="none" stroke-linecap="round"
+                stroke-dasharray="213.6" stroke-dashoffset="213.6"
+                transform="rotate(-90 40 40)"/>
+      </svg>
+      <p id="holdText" class="hold-text"></p>
+    `;
+    const stage = document.querySelector(".camera-stage");
+    if (stage) stage.appendChild(el);
+    else document.body.appendChild(el);
+  }
+  el.style.opacity = "1";
+  document.getElementById("holdText").textContent = text;
+  const fill = document.getElementById("holdRingFill");
+  if (fill) {
+    const circumference = 2 * Math.PI * 34;
+    fill.setAttribute("stroke-dashoffset", String(circumference * (1 - ratio)));
+  }
+}
+
 function dispatchEvent(label, confidence, anchor, handedness) {
   const binding = state.bindings[label];
-  if (!binding || !binding.enabled) return;
+  if (!binding || !binding.enabled) {
+    resetHold();
+    return;
+  }
+
+  // 长按确认逻辑
+  if (HOLD_CONFIRM_ACTIONS.has(binding.action)) {
+    const cn = GESTURE_LABELS_CN[label] || label;
+    if (holdState.label !== label) {
+      holdState.label = label;
+      holdState.action = binding.action;
+      holdState.startedAt = performance.now();
+      holdState.fired = false;
+    }
+    if (holdState.fired) return;
+    const ratio = holdProgressRatio();
+    setHoldOverlay(`${cn} 保持中...`, ratio);
+    if (ratio >= 1.0) {
+      holdState.fired = true;
+      setHoldOverlay(`${cn} ✓`, 1);
+      setTimeout(() => setHoldOverlay(null, 0), 600);
+      // fall through, 触发实际动作
+    } else {
+      return;
+    }
+  } else if (holdState.label && holdState.label !== label) {
+    resetHold();
+  }
   if (state.testMode) {
     const cn = GESTURE_LABELS_CN[label] || label;
     showBubble(`[测试] ${cn} → ${actionLabel(binding.action)}`, "info");
@@ -702,10 +849,41 @@ function renderBindingsPanel() {
     toggle.appendChild(checkbox);
     toggle.appendChild(toggleText);
 
+    // 模拟触发按钮（不用真比手势就能测试这个绑定的效果）
+    const sim = document.createElement("button");
+    sim.type = "button";
+    sim.className = "binding-sim";
+    sim.textContent = "▶";
+    sim.title = "模拟触发该手势（用于调试与演示）";
+    sim.addEventListener("click", () => simulateGesture(label));
+
     row.appendChild(nameBlock);
     row.appendChild(select);
     row.appendChild(toggle);
+    row.appendChild(sim);
     list.appendChild(row);
+  }
+}
+
+// 模拟一次手势触发（点绑定行的 ▶ 按钮调用），用于调试 + 课堂演示。
+// 长按确认类动作会做 4 次循环喂数据填满 1 秒进度条；普通动作直接 fire 一次。
+async function simulateGesture(label) {
+  const binding = state.bindings[label];
+  if (!binding || !binding.enabled) {
+    showBubble(`${GESTURE_LABELS_CN[label] || label} 未启用`, "warn");
+    return;
+  }
+  showBubble(`[模拟] ${GESTURE_LABELS_CN[label] || label}`, "info");
+  const anchor = { x: 0.5, y: 0.5 };
+  if (HOLD_CONFIRM_ACTIONS.has(binding.action)) {
+    // 模拟保持 1 秒：每 100ms 喂一次
+    const ticks = Math.ceil(HOLD_CONFIRM_MS / 100) + 2;
+    for (let i = 0; i < ticks; i += 1) {
+      dispatchEvent(label, 0.95, anchor, "Right");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  } else {
+    dispatchEvent(label, 0.95, anchor, "Right");
   }
 }
 
