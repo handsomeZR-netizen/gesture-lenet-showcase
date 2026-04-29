@@ -359,18 +359,39 @@ async function startCamera() {
   requestAnimationFrame(loop);
 }
 
+// 尺寸缓存：给 canvas 赋 width/height 会立刻清空 canvas，
+// 哪怕赋的是和当前相同的值也会清。所以 syncOverlaySize 必须做 cache，
+// 仅在尺寸真正变化时才 resize，否则会导致主循环每帧清空一次画面 → 闪烁。
+const _sizeCache = { w: 0, h: 0, dpr: 0, procInit: false };
+
 function syncOverlaySize() {
   const rect = video.getBoundingClientRect();
   if (!rect.width || !rect.height) return;
   const dpr = window.devicePixelRatio || 1;
+  const sizeChanged =
+    Math.abs(rect.width - _sizeCache.w) > 0.5 ||
+    Math.abs(rect.height - _sizeCache.h) > 0.5 ||
+    dpr !== _sizeCache.dpr;
+  if (!sizeChanged) return;
+
+  _sizeCache.w = rect.width;
+  _sizeCache.h = rect.height;
+  _sizeCache.dpr = dpr;
+
   overlayCanvas.width = Math.round(rect.width * dpr);
   overlayCanvas.height = Math.round(rect.height * dpr);
   overlayCanvas.style.width = `${rect.width}px`;
   overlayCanvas.style.height = `${rect.height}px`;
   overlayContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+
   if (processedCanvas) {
-    processedCanvas.width = _proc.width;
-    processedCanvas.height = _proc.height;
+    // processedCanvas 内部分辨率固定为 _proc.width × _proc.height（降采样处理用）
+    // 只在第一次或重设时改 width/height，后续只更新 CSS 尺寸
+    if (!_sizeCache.procInit) {
+      processedCanvas.width = _proc.width;
+      processedCanvas.height = _proc.height;
+      _sizeCache.procInit = true;
+    }
     processedCanvas.style.width = `${rect.width}px`;
     processedCanvas.style.height = `${rect.height}px`;
   }
